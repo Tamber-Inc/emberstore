@@ -6,6 +6,25 @@ if (APPLE)
     enable_language(OBJCXX)
 endif ()
 
+option(EMBERSTORE_ASAN "Build with AddressSanitizer" OFF)
+
+if (EMBERSTORE_ASAN)
+    if (MSVC)
+        add_compile_options(/fsanitize=address)
+    else ()
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    endif ()
+endif ()
+
+# Warnings-as-errors for this repo's own targets only — dependencies are built
+# with their own flags.
+if (MSVC)
+    set(EMBERSTORE_WARNINGS /W4 /WX)
+else ()
+    set(EMBERSTORE_WARNINGS -Wall -Werror)
+endif ()
+
 include(cmake/CPM.cmake)
 
 if (NOT TARGET eacp-core)
@@ -44,6 +63,7 @@ endif ()
 
 target_include_directories(emberstore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(emberstore PUBLIC cxx_std_20)
+target_compile_options(emberstore PRIVATE ${EMBERSTORE_WARNINGS})
 target_link_libraries(emberstore PUBLIC eacp-core Miro)
 
 if (PROJECT_IS_TOP_LEVEL)

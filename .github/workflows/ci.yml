@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: clang-format
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: git ls-files '*.h' '*.cpp' '*.mm' | xargs clang-format --dry-run --Werror
+
+  test:
+    name: build + test (${{ matrix.os }})
+    strategy:
+      # See every platform's result — FileLock/FileWatcher especially diverge
+      # per platform.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  asan:
+    name: ASan test run
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-asan-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build-asan -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DEMBERSTORE_ASAN=ON
+
+      - name: Build
+        run: cmake --build build-asan --config RelWithDebInfo -j
+
+      - name: Test
+        run: ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure

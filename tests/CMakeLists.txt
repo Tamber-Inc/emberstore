@@ -34,3 +34,7 @@ nano_discover_tests(FileWatcherTests)
 
 add_executable(SearchDemo SearchDemo.cpp)
 target_link_libraries(SearchDemo PRIVATE emberstore)
+
+foreach (target TestContest EmberstoreTests FileWatcherTests SearchDemo)
+    target_compile_options(${target} PRIVATE ${EMBERSTORE_WARNINGS})
+endforeach ()

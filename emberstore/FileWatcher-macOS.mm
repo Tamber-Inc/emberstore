@@ -38,9 +38,9 @@ struct FileWatcher::Impl
         if (stream == nullptr)
             return;
 
-        // Scheduled on the main run loop, so onEvents fires on the main thread.
-        FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetMain(),
-                                         kCFRunLoopDefaultMode);
+        // Delivered on the main queue — drained by the main run loop — so
+        // onEvents fires on the main thread.
+        FSEventStreamSetDispatchQueue(stream, dispatch_get_main_queue());
         FSEventStreamStart(stream);
     }
 
