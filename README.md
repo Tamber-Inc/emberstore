@@ -1,3 +1,6 @@
+> Warning! This is alpha software. This is subject to change and may break your
+> code. Use at your own risk. Bugs likely.
+
 # emberstore
 
 Embedded document store for [Miro](https://github.com/eyalamirmusic/Miro) types — SQLite-shaped, Firestore-flavoured. Writes are atomic (temp + rename, optional fsync).
