@@ -21,8 +21,7 @@ target_link_libraries(TestContest PUBLIC
 # re-invoke itself as a real contending process (--contest-file).
 add_executable(EmberstoreTests
         LocalDatabaseTests.cpp DatabaseTests.cpp DatabaseContentionTests.cpp
-        CollectionPerfTests.cpp LiveDocumentTests.cpp AppDatabaseTests.cpp
-        FileLockTests.cpp)
+        CollectionPerfTests.cpp LiveDocumentTests.cpp AppDatabaseTests.cpp)
 target_link_libraries(EmberstoreTests PRIVATE
         NanoTest TestContest emberstore)
 nano_discover_tests(EmberstoreTests)

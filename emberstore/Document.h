@@ -4,9 +4,10 @@
 
 #include <Miro/Reflect.h>
 #include <eacp/Core/Threads/ThreadUtils.h>
-#include "FileLock.h"
+#include <eacp/Core/Utils/Time.h>
+#include <eacp/Network/IPC/Lock.h>
 
-#include <chrono>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -65,7 +66,10 @@ public:
     bool write(const T& value)
     {
         eacp::Threads::assertMainThread();
-        const auto held = ScopedLock {lock, lockTimeout};
+        auto* const guard = lockHandle();
+        if (guard == nullptr)
+            return false;
+        const auto held = eacp::IPC::ScopedLock {*guard, lockTimeout};
         if (!held)
             return false;
 
@@ -91,7 +95,10 @@ public:
     bool mutate(Fn&& fn)
     {
         eacp::Threads::assertMainThread();
-        const auto held = ScopedLock {lock, lockTimeout};
+        auto* const guard = lockHandle();
+        if (guard == nullptr)
+            return false;
+        const auto held = eacp::IPC::ScopedLock {*guard, lockTimeout};
         if (!held)
             return false;
 
@@ -129,17 +136,39 @@ private:
             path, Miro::toJSONString(value, 2) + "\n", durability);
     }
 
+    // The interprocess lock, created on first use. Null only if eacp cannot back
+    // the name with a file at all, which a caller sees as a failed acquire — the
+    // same outcome as another process holding it, never a thrown exception.
+    eacp::IPC::Lock* lockHandle()
+    {
+        if (!lock)
+        {
+            try
+            {
+                lock = std::make_unique<eacp::IPC::Lock>(path.str());
+            }
+            catch (const eacp::IPC::Error&)
+            {
+                return nullptr;
+            }
+        }
+        return lock.get();
+    }
+
     // How long a write waits for another process before giving up. Bounded so a
     // stalled sibling app can't hang the message thread; the write just fails.
-    static constexpr auto lockTimeout = std::chrono::milliseconds {250};
+    static constexpr auto lockTimeout = eacp::Time::MS {250};
 
     eacp::FilePath path;
     Durability durability;
     std::optional<T> cache;
     detail::FileStamp stamp;
 
-    // Locked beside the document, never the document itself: publishing by
-    // rename replaces that file, so a lock on it would guard an orphaned inode.
-    FileLock lock {eacp::FilePath {path.str() + ".lock"}};
+    // One interprocess lock per document, named by the document's path — eacp
+    // keys it to a lock file of its own, so nothing lands beside the document
+    // for a publish-by-rename to orphan. Held via unique_ptr so a Document stays
+    // movable (an eacp::IPC::Lock is not) and constructing one still touches
+    // nothing on disk until the first write actually takes the lock.
+    std::unique_ptr<eacp::IPC::Lock> lock;
 };
 } // namespace emberstore

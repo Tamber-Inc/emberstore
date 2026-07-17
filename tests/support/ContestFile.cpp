@@ -1,8 +1,7 @@
 #include "ContestFile.h"
 
-#include <emberstore/FileLock.h>
-
 #include <eacp/Core/Utils/Containers.h>
+#include <eacp/Network/IPC/Lock.h>
 
 #include <chrono>
 #include <cstdio>
@@ -58,8 +57,11 @@ int runIfContestInvocation(int argc, char** argv)
         return 0;
     }
 
-    auto lock = emberstore::FileLock {path};
-    if (!lock.tryAcquire())
+    // path is the lock *name* the Document locks under (its file path); eacp
+    // maps it to a lock file of its own, so contending here is real contention.
+    auto lock = eacp::IPC::Lock {path};
+    auto guard = eacp::IPC::ScopedLock {lock};
+    if (!guard.isLocked())
     {
         std::puts("busy");
         std::fflush(stdout);

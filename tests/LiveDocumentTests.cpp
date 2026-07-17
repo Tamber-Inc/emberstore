@@ -4,12 +4,12 @@
 // no-op touches must not echo a second publish. Pumps the real event loop,
 // like the FileWatcher tests.
 
-#include <emberstore/FileLock.h>
 #include <emberstore/Live.h>
 #include <emberstore/Emberstore.h>
 
 #include <ea_data_structures/Pointers/Broadcaster.h>
 #include <eacp/Core/Threads/EventLoop.h>
+#include <eacp/Network/IPC/Lock.h>
 
 #include <NanoTest/NanoTest.h>
 
@@ -173,8 +173,9 @@ auto tUpdateHoldsTheLockAcrossReadModifyWrite =
         {
             // Another process could only get in here if the lock had been
             // dropped between reading and writing.
-            auto other = emberstore::FileLock {dir.file() + ".lock"};
-            lockedWhileEditing = !other.tryAcquire();
+            auto other = eacp::IPC::Lock {dir.file()};
+            auto guard = eacp::IPC::ScopedLock {other};
+            lockedWhileEditing = !guard.isLocked();
             pet.age = 4;
         });
 
@@ -206,8 +207,9 @@ auto tBlockedWriteDoesNotPublish =
     fx.live.set({"Rex", 3});
     fx.publishes.store(0);
 
-    auto other = emberstore::FileLock {dir.file() + ".lock"};
-    check(other.tryAcquire());
+    auto other = eacp::IPC::Lock {dir.file()};
+    auto guard = eacp::IPC::ScopedLock {other};
+    check(guard.isLocked());
 
     check(!fx.live.set({"Blocked", 9}));
     check(!fx.live.update([](Pet& pet) { pet.age = 99; }));
