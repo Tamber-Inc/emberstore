@@ -16,11 +16,13 @@ build:
 test: build
     ctest --test-dir build -C Release --output-on-failure
 
+# The perf guard is excluded: its timing bounds only mean something
+# un-instrumented, and ASan always trips them.
 [doc('Build + run the tests under AddressSanitizer')]
 test-asan:
     cmake -B build-asan -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DEMBERSTORE_ASAN=ON
     cmake --build build-asan --config RelWithDebInfo -j
-    ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure
+    ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure -E "1M random rows"
 
 [doc('clang-format check (no changes written)')]
 [unix]
