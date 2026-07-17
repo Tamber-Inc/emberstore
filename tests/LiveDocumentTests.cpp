@@ -194,7 +194,7 @@ auto tUpdateEditsWhatAnotherProcessWrote =
     check(fx.live.update([](Pet& pet) { pet.age += 1; }));
 
     const auto pet = fx.live.get();
-    check(pet.age == 11);      // 10 + 1, not 3 + 1
+    check(pet.age == 11); // 10 + 1, not 3 + 1
     check(pet.name == "Fido"); // their write survived our edit
 };
 

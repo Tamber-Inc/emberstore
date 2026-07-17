@@ -19,7 +19,10 @@ namespace fs = std::filesystem;
 // drops the lock when the descriptor closes, including on a crash.
 struct FileLock::Impl
 {
-    explicit Impl(fs::path pathToUse) : path(std::move(pathToUse)) {}
+    explicit Impl(fs::path pathToUse)
+        : path(std::move(pathToUse))
+    {
+    }
 
     ~Impl()
     {

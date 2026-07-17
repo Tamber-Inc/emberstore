@@ -44,7 +44,8 @@ void printRows(const std::vector<Sample>& rows)
 
 int main()
 {
-    const auto root = std::filesystem::temp_directory_path() / "emberstore-search-demo";
+    const auto root =
+        std::filesystem::temp_directory_path() / "emberstore-search-demo";
     std::filesystem::remove_all(root);
 
     auto db = emberstore::Database {root.string()};

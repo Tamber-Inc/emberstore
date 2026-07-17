@@ -30,7 +30,7 @@ struct TempDir
     {
         static std::atomic<int> counter {0};
         root = fs::temp_directory_path()
-             / ("emberstore-perf-test-" + std::to_string(counter.fetch_add(1)));
+               / ("emberstore-perf-test-" + std::to_string(counter.fetch_add(1)));
         fs::remove_all(root);
     }
 
@@ -73,7 +73,7 @@ auto tMillionRowSearch =
                           "tag-" + std::to_string(rng() % 16)});
 
     emberstore::Document<std::map<std::string, Row>> {path,
-                                                   emberstore::Durability::Atomic}
+                                                      emberstore::Durability::Atomic}
         .set(data);
 
     auto collection = emberstore::Collection<Row> {path};
@@ -98,7 +98,10 @@ auto tMillionRowSearch =
 
     std::printf("[perf] 1M rows: cold where()=%.0f ms, warm where()=%.1f ms, "
                 "scan-only=%.1f ms, hits=%zu\n",
-                coldMs, warmMs, scanMs, hits.size());
+                coldMs,
+                warmMs,
+                scanMs,
+                hits.size());
 
     check(rows.size() == static_cast<std::size_t>(rowCount));
     check(!hits.empty());

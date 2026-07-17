@@ -28,7 +28,7 @@ struct TempDir
     {
         static std::atomic<int> counter {0};
         root = fs::temp_directory_path()
-             / ("emberstore-watch-test-" + std::to_string(counter.fetch_add(1)));
+               / ("emberstore-watch-test-" + std::to_string(counter.fetch_add(1)));
         fs::remove_all(root);
         fs::create_directories(root);
     }
@@ -74,8 +74,7 @@ auto tFiresOnModify = test("FileWatcher/fires when the watched file changes") = 
     check(waitForChange(changes));
 };
 
-auto tFiresOnCreate =
-    test("FileWatcher/fires when the watched file is created") = []
+auto tFiresOnCreate = test("FileWatcher/fires when the watched file is created") = []
 {
     auto dir = TempDir {};
     const auto path = dir.file("later.json"); // does not exist yet

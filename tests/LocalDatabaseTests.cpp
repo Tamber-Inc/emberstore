@@ -199,8 +199,8 @@ auto tMutateSeesAnotherProcessesWrite =
     doc.mutate([](Settings& s) { s.version += 100; });
 
     auto s = doc.read();
-    check(s.version == 107);      // 7 + 100, not 1 + 100
-    check(s.note == "theirs");    // their value survived our edit
+    check(s.version == 107); // 7 + 100, not 1 + 100
+    check(s.note == "theirs"); // their value survived our edit
 };
 
 auto tCorruptFileReadsDefault =
@@ -270,7 +270,8 @@ auto tAtomicDurabilityAlsoWorks =
     test("Document/Durability::Atomic writes and reloads correctly") = []
 {
     auto dir = TempDir {};
-    auto doc = emberstore::Document<Settings> {dir.file(), emberstore::Durability::Atomic};
+    auto doc =
+        emberstore::Document<Settings> {dir.file(), emberstore::Durability::Atomic};
     check(doc.write({9, "fast", {}}));
 
     auto reopened = emberstore::Document<Settings> {dir.file()};

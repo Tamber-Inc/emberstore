@@ -37,7 +37,7 @@ struct TempDir
     {
         static std::atomic<int> counter {0};
         root = fs::temp_directory_path()
-             / ("emberstore-lock-test-" + std::to_string(counter.fetch_add(1)));
+               / ("emberstore-lock-test-" + std::to_string(counter.fetch_add(1)));
         fs::remove_all(root);
     }
 
@@ -81,8 +81,7 @@ auto tSecondHolderIsExcluded =
     check(!second.isHeld());
 };
 
-auto tReleasePassesItOn =
-    test("FileLock/releasing lets the next holder in") = []
+auto tReleasePassesItOn = test("FileLock/releasing lets the next holder in") = []
 {
     auto dir = TempDir {};
     auto first = emberstore::FileLock {dir.file()};
@@ -128,8 +127,7 @@ auto tAcquireTimesOut =
 };
 
 auto tAcquireSucceedsWithinTimeout =
-    test("FileLock/acquire takes a free lock without waiting out the timeout") =
-        []
+    test("FileLock/acquire takes a free lock without waiting out the timeout") = []
 {
     auto dir = TempDir {};
     auto lock = emberstore::FileLock {dir.file()};

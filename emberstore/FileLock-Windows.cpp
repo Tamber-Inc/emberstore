@@ -21,7 +21,10 @@ namespace fs = std::filesystem;
 // is locked (MAXDWORD:MAXDWORD) since the file's contents are irrelevant.
 struct FileLock::Impl
 {
-    explicit Impl(fs::path pathToUse) : path(std::move(pathToUse)) {}
+    explicit Impl(fs::path pathToUse)
+        : path(std::move(pathToUse))
+    {
+    }
 
     ~Impl()
     {
@@ -43,8 +46,11 @@ struct FileLock::Impl
 
         handle = ::CreateFileW(path.wstring().c_str(),
                                GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr,
+                               OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
         return handle != INVALID_HANDLE_VALUE;
     }
 
@@ -58,8 +64,11 @@ struct FileLock::Impl
         auto overlapped = OVERLAPPED {};
         held = ::LockFileEx(handle,
                             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                            0, MAXDWORD, MAXDWORD, &overlapped)
-            != FALSE;
+                            0,
+                            MAXDWORD,
+                            MAXDWORD,
+                            &overlapped)
+               != FALSE;
         return held;
     }
 

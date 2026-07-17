@@ -30,9 +30,13 @@ namespace fs = std::filesystem;
 void syncFile(const fs::path& file)
 {
 #if defined(_WIN32)
-    auto handle = ::CreateFileW(file.c_str(), GENERIC_WRITE,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    auto handle = ::CreateFileW(file.c_str(),
+                                GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                nullptr);
     if (handle != INVALID_HANDLE_VALUE)
     {
         ::FlushFileBuffers(handle);

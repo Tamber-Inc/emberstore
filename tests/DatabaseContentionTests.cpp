@@ -37,8 +37,9 @@ struct TempDir
     TempDir()
     {
         static std::atomic<int> counter {0};
-        root = fs::temp_directory_path()
-               / ("emberstore-db-contention-" + std::to_string(counter.fetch_add(1)));
+        root =
+            fs::temp_directory_path()
+            / ("emberstore-db-contention-" + std::to_string(counter.fetch_add(1)));
         fs::remove_all(root);
     }
 
@@ -97,14 +98,15 @@ auto tAcquireOutlastsABusyHolder =
     // lock lives on the worker thread — the Database is main-thread only.
     auto started = std::atomic<bool> {false};
     auto held = std::atomic<bool> {false};
-    auto worker = std::thread {[&]
-    {
-        auto lock = emberstore::FileLock {dir.lockFile()};
-        held = lock.tryAcquire();
-        started = true;
-        if (held)
-            std::this_thread::sleep_for(100ms);
-    }}; // released by destruction, as if the holder exited
+    auto worker =
+        std::thread {[&]
+                     {
+                         auto lock = emberstore::FileLock {dir.lockFile()};
+                         held = lock.tryAcquire();
+                         started = true;
+                         if (held)
+                             std::this_thread::sleep_for(100ms);
+                     }}; // released by destruction, as if the holder exited
 
     while (!started)
         std::this_thread::yield();
@@ -129,9 +131,8 @@ auto tCrashedHolderDoesNotWedgeTheDatabase =
     {
         auto crashed = emberstore::FileLock {dir.lockFile()};
         check(crashed.tryAcquire());
-        emberstore::Database {dir.path()}.collection<Profile>("users")
-            .doc("a")
-            .set({"Ann", 1});
+        emberstore::Database {dir.path()}.collection<Profile>("users").doc("a").set(
+            {"Ann", 1});
     } // destroyed holding the lock — the OS releases it, as on a process crash
 
     // The next writer gets straight in and the data survived.
@@ -151,12 +152,12 @@ auto tCrashedHolderDoesNotWedgeTheDatabase =
 // per-file lock rather than a root lock taken by hand — i.e. the protection a
 // caller gets for free.
 
-auto tRealProcessBlocksAWrite =
-    test("Contention/a write fails while a real process holds the document lock") = []
+auto tRealProcessBlocksAWrite = test(
+    "Contention/a write fails while a real process holds the document lock") = []
 {
     auto dir = TempDir {};
     auto db = emberstore::Database {dir.path()};
-    auto doc = db.document<Profile> ("session");
+    auto doc = db.document<Profile>("session");
     check(doc.write({"mine", 1}));
 
     const auto lockFile = doc.filePath().str() + ".lock";
@@ -177,7 +178,7 @@ auto tRealProcessIsExcludedForTheWholeMutate =
 {
     auto dir = TempDir {};
     auto db = emberstore::Database {dir.path()};
-    auto doc = db.document<Profile> ("session");
+    auto doc = db.document<Profile>("session");
     doc.write({"mine", 1});
 
     const auto lockFile = doc.filePath().str() + ".lock";
@@ -187,7 +188,7 @@ auto tRealProcessIsExcludedForTheWholeMutate =
         {
             // A real process asks for the lock while we are mid-edit.
             sawBusy = testing::runContender("try", lockFile).find("busy")
-                   != std::string::npos;
+                      != std::string::npos;
             profile.level = 2;
         }));
 
