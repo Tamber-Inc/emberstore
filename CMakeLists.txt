@@ -44,19 +44,17 @@ endif ()
 add_library(emberstore STATIC
         emberstore/AtomicFile.cpp)
 
-# The filesystem backends (file watching, inter-process locks) are macOS and
-# Windows only — a platform without one fails the build rather than silently
-# doing nothing.
+# The file-watching backend is macOS and Windows only — a platform without one
+# fails the build rather than silently doing nothing. (Inter-process locking now
+# comes from eacp, which carries its own per-platform backend.)
 if (APPLE)
     target_sources(emberstore PRIVATE
-            emberstore/FileWatcher-macOS.mm
-            emberstore/FileLock-POSIX.cpp)
+            emberstore/FileWatcher-macOS.mm)
     target_link_libraries(emberstore PUBLIC
             "-framework CoreServices" "-framework Foundation")
 elseif (WIN32)
     target_sources(emberstore PRIVATE
-            emberstore/FileWatcher-Windows.cpp
-            emberstore/FileLock-Windows.cpp)
+            emberstore/FileWatcher-Windows.cpp)
 else ()
     message(FATAL_ERROR "emberstore: no filesystem backend for this platform")
 endif ()
@@ -64,7 +62,9 @@ endif ()
 target_include_directories(emberstore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(emberstore PUBLIC cxx_std_20)
 target_compile_options(emberstore PRIVATE ${EMBERSTORE_WARNINGS})
-target_link_libraries(emberstore PUBLIC eacp-core Miro)
+# eacp-network carries the interprocess lock (eacp::IPC::Lock) that Document.h
+# now leans on; PUBLIC because that lock leaks through our public headers.
+target_link_libraries(emberstore PUBLIC eacp-core eacp-network Miro)
 
 if (PROJECT_IS_TOP_LEVEL)
     enable_testing()

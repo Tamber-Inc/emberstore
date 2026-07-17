@@ -19,10 +19,10 @@ namespace emberstore::testing
 //   crash        take the lock, report "locked", then die still holding it
 //   write <text> overwrite the file ignoring the lock, as an editor would
 //
-// Needed because a second FileLock inside one process only proves the lock
-// binds to the descriptor. It says nothing about whether the lock actually
-// crosses a process boundary, and nothing at all about the OS releasing it when
-// a holder dies — which is the property the design leans on.
+// Needed because a second lock inside one process only proves the lock binds to
+// the descriptor. It says nothing about whether the lock actually crosses a
+// process boundary, and nothing at all about the OS releasing it when a holder
+// dies — which is the property the design leans on.
 //
 // Wired up by linking TestContest instead of NanoTestMain; see ContestMain.cpp.
 

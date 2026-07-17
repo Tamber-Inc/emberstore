@@ -1,18 +1,19 @@
-// Contention tests for a Database shared between programs: the FileLock on the
-// root is what serializes them, so these drive the two together — writers
+// Contention tests for a Database shared between programs: an eacp::IPC::Lock on
+// the root is what serializes them, so these drive the two together — writers
 // handing the root back and forth, a writer waiting out a busy holder, and a
 // holder that "crashes" without releasing.
 //
 // The lock attaches to the open file description / handle (flock on macOS,
-// LockFileEx on Windows), so a second FileLock in this process contends exactly
-// as a second process would — see FileLockTests.cpp. The Database itself is
-// message-thread only (it asserts), so every Database call here stays on the
-// test's main thread; only the lock is touched from a worker.
-
-#include <emberstore/FileLock.h>
+// LockFileEx on Windows), so a second Lock in this process contends exactly as a
+// second process would. The Database itself is message-thread only (it asserts),
+// so every Database call here stays on the test's main thread; only the lock is
+// touched from a worker.
 
 #include "ContestFile.h"
 #include <emberstore/Emberstore.h>
+
+#include <eacp/Core/Utils/Time.h>
+#include <eacp/Network/IPC/Lock.h>
 
 #include <NanoTest/NanoTest.h>
 
@@ -63,27 +64,36 @@ auto tLockHandsTheDatabaseBetweenWriters =
 {
     auto dir = TempDir {};
 
-    // Writer A — what the hub process looks like. Takes the root, writes.
-    auto aLock = emberstore::FileLock {dir.lockFile()};
-    check(aLock.tryAcquire());
+    // Two writers fighting over the same root lock — A is the hub, B a
+    // standalone app pointed at the same folder. Each holds the lock only for as
+    // long as its guard is in scope, so dropping the guard hands the root over.
+    auto aLock = eacp::IPC::Lock {dir.lockFile()};
+    auto bLock = eacp::IPC::Lock {dir.lockFile()};
     auto aDb = emberstore::Database {dir.path()};
-    aDb.document<Profile>("session").set({"hub", 1});
-
-    // Writer B — a standalone app pointed at the same root. Locked out while
-    // A holds it.
-    auto bLock = emberstore::FileLock {dir.lockFile()};
-    check(!bLock.tryAcquire());
-
-    // A hands the root over; B sees A's write and replaces it.
-    aLock.release();
-    check(bLock.tryAcquire());
     auto bDb = emberstore::Database {dir.path()};
-    check(bDb.document<Profile>("session").get().name == "hub");
-    bDb.document<Profile>("session").set({"standalone", 2});
+
+    {
+        // A takes the root and writes. B, pointed at the same root, is locked
+        // out while A holds it.
+        auto aHeld = eacp::IPC::ScopedLock {aLock};
+        check(aHeld.isLocked());
+        aDb.document<Profile>("session").set({"hub", 1});
+
+        auto bHeld = eacp::IPC::ScopedLock {bLock};
+        check(!bHeld.isLocked());
+    } // A hands the root over here
+
+    {
+        // B gets in, sees A's write, and replaces it.
+        auto bHeld = eacp::IPC::ScopedLock {bLock};
+        check(bHeld.isLocked());
+        check(bDb.document<Profile>("session").get().name == "hub");
+        bDb.document<Profile>("session").set({"standalone", 2});
+    } // B hands it back
 
     // And back again — A picks up B's write, not its own stale value.
-    bLock.release();
-    check(aLock.tryAcquire());
+    auto aHeld = eacp::IPC::ScopedLock {aLock};
+    check(aHeld.isLocked());
     check(aDb.document<Profile>("session").get().name == "standalone");
     check(aDb.document<Profile>("session").get().level == 2);
 };
@@ -101,10 +111,11 @@ auto tAcquireOutlastsABusyHolder =
     auto worker =
         std::thread {[&]
                      {
-                         auto lock = emberstore::FileLock {dir.lockFile()};
-                         held = lock.tryAcquire();
+                         auto lock = eacp::IPC::Lock {dir.lockFile()};
+                         auto guard = eacp::IPC::ScopedLock {lock};
+                         held = guard.isLocked();
                          started = true;
-                         if (held)
+                         if (guard.isLocked())
                              std::this_thread::sleep_for(100ms);
                      }}; // released by destruction, as if the holder exited
 
@@ -113,8 +124,9 @@ auto tAcquireOutlastsABusyHolder =
     check(held);
 
     // Genuine contention: this polls against a live holder until it lets go.
-    auto lock = emberstore::FileLock {dir.lockFile()};
-    check(lock.acquire(5s));
+    auto lock = eacp::IPC::Lock {dir.lockFile()};
+    auto guard = eacp::IPC::ScopedLock {lock, eacp::Time::MS {5000}};
+    check(guard.isLocked());
     worker.join();
 
     // The root is ours; the document written before the hand-off is intact.
@@ -129,15 +141,17 @@ auto tCrashedHolderDoesNotWedgeTheDatabase =
     auto dir = TempDir {};
 
     {
-        auto crashed = emberstore::FileLock {dir.lockFile()};
-        check(crashed.tryAcquire());
+        auto crashed = eacp::IPC::Lock {dir.lockFile()};
+        auto guard = eacp::IPC::ScopedLock {crashed};
+        check(guard.isLocked());
         emberstore::Database {dir.path()}.collection<Profile>("users").doc("a").set(
             {"Ann", 1});
     } // destroyed holding the lock — the OS releases it, as on a process crash
 
     // The next writer gets straight in and the data survived.
-    auto lock = emberstore::FileLock {dir.lockFile()};
-    check(lock.tryAcquire());
+    auto lock = eacp::IPC::Lock {dir.lockFile()};
+    auto guard = eacp::IPC::ScopedLock {lock};
+    check(guard.isLocked());
     auto users = emberstore::Database {dir.path()}.collection<Profile>("users");
     check(users.doc("a").get()->name == "Ann");
     check(users.doc("b").set({"Bo", 2}));
@@ -146,11 +160,11 @@ auto tCrashedHolderDoesNotWedgeTheDatabase =
 
 // --- Real processes -------------------------------------------------------
 //
-// Everything above contends with a second FileLock inside this process, which
-// only exercises the lock's semantics. These re-invoke the test binary so the
-// other side is a genuine OS process, and they go through Document's own
-// per-file lock rather than a root lock taken by hand — i.e. the protection a
-// caller gets for free.
+// Everything above contends with a second Lock inside this process, which only
+// exercises the lock's semantics. These re-invoke the test binary so the other
+// side is a genuine OS process, and they go through Document's own per-file lock
+// rather than a root lock taken by hand — i.e. the protection a caller gets for
+// free.
 
 auto tRealProcessBlocksAWrite = test(
     "Contention/a write fails while a real process holds the document lock") = []
@@ -160,8 +174,10 @@ auto tRealProcessBlocksAWrite = test(
     auto doc = db.document<Profile>("session");
     check(doc.write({"mine", 1}));
 
-    const auto lockFile = doc.filePath().str() + ".lock";
-    auto holder = testing::startLockHolder(lockFile, 2000);
+    // The name Document locks under is its own file path — hold that and the
+    // real process contends exactly as another writer would.
+    const auto lockName = doc.filePath().str();
+    auto holder = testing::startLockHolder(lockName, 2000);
     check(holder != nullptr); // it announced that it holds the lock
 
     check(!doc.write({"blocked", 2}));
@@ -181,13 +197,13 @@ auto tRealProcessIsExcludedForTheWholeMutate =
     auto doc = db.document<Profile>("session");
     doc.write({"mine", 1});
 
-    const auto lockFile = doc.filePath().str() + ".lock";
+    const auto lockName = doc.filePath().str();
     auto sawBusy = false;
     check(doc.mutate(
         [&](Profile& profile)
         {
             // A real process asks for the lock while we are mid-edit.
-            sawBusy = testing::runContender("try", lockFile).find("busy")
+            sawBusy = testing::runContender("try", lockName).find("busy")
                       != std::string::npos;
             profile.level = 2;
         }));

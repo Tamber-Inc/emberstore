@@ -3,8 +3,9 @@
 // reload) because durable atomic persistence is the whole point: a fake
 // filesystem would test nothing.
 
-#include <emberstore/FileLock.h>
 #include <emberstore/Emberstore.h>
+
+#include <eacp/Network/IPC/Lock.h>
 
 #include <NanoTest/NanoTest.h>
 
@@ -147,9 +148,9 @@ auto tPicksUpExternalWrite =
     check(s.note == "theirs");
 };
 
-// Stands in for another process: the same lock file the Document guards its
-// writes with. flock/LockFileEx bind to the descriptor, not the process, so
-// taking it here contends exactly as a second app would.
+// Stands in for another process: the same lock the Document guards its writes
+// with, named by the document's path. flock/LockFileEx bind to the descriptor,
+// not the process, so taking it here contends exactly as a second app would.
 auto tWriteFailsWhileAnotherProcessHoldsTheLock =
     test("Document/write fails while another process holds the lock") = []
 {
@@ -157,14 +158,16 @@ auto tWriteFailsWhileAnotherProcessHoldsTheLock =
     auto doc = emberstore::Document<Settings> {dir.file()};
     check(doc.write({1, "mine", {}}));
 
-    auto other = emberstore::FileLock {dir.file() + ".lock"};
-    check(other.tryAcquire());
+    auto other = eacp::IPC::Lock {dir.file()};
+    {
+        auto held = eacp::IPC::ScopedLock {other};
+        check(held.isLocked());
 
-    check(!doc.write({2, "blocked", {}}));
-    check(doc.read().version == 1); // disk untouched
+        check(!doc.write({2, "blocked", {}}));
+        check(doc.read().version == 1); // disk untouched
+    } // lock free again
 
-    other.release();
-    check(doc.write({3, "after", {}})); // lock free again
+    check(doc.write({3, "after", {}}));
     check(doc.read().version == 3);
 };
 
@@ -175,8 +178,9 @@ auto tMutateFailsWhileAnotherProcessHoldsTheLock =
     auto doc = emberstore::Document<Settings> {dir.file()};
     doc.write({1, "mine", {}});
 
-    auto other = emberstore::FileLock {dir.file() + ".lock"};
-    check(other.tryAcquire());
+    auto other = eacp::IPC::Lock {dir.file()};
+    auto held = eacp::IPC::ScopedLock {other};
+    check(held.isLocked());
 
     check(!doc.mutate([](Settings& s) { s.version = 99; }));
     check(doc.read().version == 1); // the read-modify-write never happened
