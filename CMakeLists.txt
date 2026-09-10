@@ -44,9 +44,10 @@ endif ()
 add_library(emberstore STATIC
         emberstore/AtomicFile.cpp)
 
-# The file-watching backend is macOS and Windows only — a platform without one
-# fails the build rather than silently doing nothing. (Inter-process locking now
-# comes from eacp, which carries its own per-platform backend.)
+# The file-watching backend is per-platform — FSEvents, ReadDirectoryChangesW,
+# inotify — and a platform without one fails the build rather than silently
+# doing nothing. (Inter-process locking now comes from eacp, which carries its
+# own per-platform backend.)
 if (APPLE)
     target_sources(emberstore PRIVATE
             emberstore/FileWatcher-macOS.mm)
@@ -55,6 +56,10 @@ if (APPLE)
 elseif (WIN32)
     target_sources(emberstore PRIVATE
             emberstore/FileWatcher-Windows.cpp)
+elseif (LINUX)
+    # inotify is in glibc; no extra library to link.
+    target_sources(emberstore PRIVATE
+            emberstore/FileWatcher-Linux.cpp)
 else ()
     message(FATAL_ERROR "emberstore: no filesystem backend for this platform")
 endif ()
