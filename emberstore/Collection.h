@@ -53,8 +53,16 @@ public:
     };
 
     explicit Collection(eacp::FilePath path,
-                        Durability durability = Durability::Durable)
-        : document(std::move(path), durability)
+                        Durability durability = Durability::Durable,
+                        Format format = Format::Json)
+        : document(std::move(path), durability, format)
+    {
+    }
+
+    Collection(eacp::FilePath path,
+               Format format,
+               Durability durability = Durability::Durable)
+        : Collection(std::move(path), durability, format)
     {
     }
 
@@ -70,17 +78,19 @@ public:
         return it->second;
     }
 
-    // Stores `value` under `id`, replacing any document already there.
+    // Stores `value` under `id`, replacing any document already there. On a
+    // binary store this appends one journal frame rather than rewriting the
+    // whole file (compacting once the appended tail outgrows the base).
     bool set(const std::string& id, const T& value)
     {
         eacp::Threads::assertMainThread();
-        return document.mutate([&](Map& all) { all[id] = value; });
+        return document.set(id, value);
     }
 
     bool remove(const std::string& id)
     {
         eacp::Threads::assertMainThread();
-        return document.mutate([&](Map& all) { all.erase(id); });
+        return document.remove(id);
     }
 
     bool contains(const std::string& id)

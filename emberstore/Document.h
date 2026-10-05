@@ -2,21 +2,76 @@
 
 #include "AtomicFile.h"
 
+#include <Miro/Binary.h>
 #include <Miro/Reflect.h>
 #include <eacp/Core/Threads/ThreadUtils.h>
 #include <eacp/Core/Utils/Time.h>
 #include <eacp/Network/IPC/Lock.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string>
 #include <utility>
 
 namespace emberstore
 {
-// A single Miro-reflected value persisted as one JSON file, read and written
-// as a whole. Every write lands atomically (temp + rename, optionally fsync'd),
-// so the file on disk is always a complete, valid T — the store can never
-// brick the app by leaving a half-written value behind.
+namespace detail
+{
+inline std::span<const std::uint8_t> asBytes(std::string_view text)
+{
+    return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
+}
+
+inline std::string_view asText(const Miro::Binary::Buffer& bytes)
+{
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
+// A stored file announces Miro's wire format with its "MIB1" (document)
+// or "MIBJ" (journal) magic; anything else is treated as JSON. This is
+// what lets reads ignore the configured Format entirely.
+inline bool looksBinary(std::string_view bytes)
+{
+    return Miro::Binary::isEncoded(asBytes(bytes));
+}
+
+// What Document knows about the file it last read or wrote, when that file
+// is a binary journal: whether appending is possible at all, how big the
+// base and the appended tail are (the compaction trigger), and whether the
+// tail ended torn — in which case the next write compacts, healing the file.
+struct JournalState
+{
+    bool active = false;
+    bool damaged = false;
+    std::size_t baseBytes = 0;
+    std::size_t tailBytes = 0;
+};
+
+inline JournalState journalStateOf(std::string_view bytes)
+{
+    const auto data = asBytes(bytes);
+
+    if (!Miro::Binary::isJournal(data))
+        return {};
+
+    const auto info = Miro::Binary::inspectJournal(data);
+
+    if (!info.valid)
+        return {};
+
+    return {true, info.truncated, info.baseSize, info.frameBytes};
+}
+} // namespace detail
+
+// A single Miro-reflected value persisted as one file — JSON or Miro's binary
+// wire format (see Format) — read and written as a whole. Every write lands
+// atomically (temp + rename, optionally fsync'd), so the file on disk is
+// always a complete, valid T — the store can never brick the app by leaving a
+// half-written value behind.
 //
 //   auto settings = Document<AppSettings> {path};
 //   auto current  = settings.read();
@@ -35,9 +90,18 @@ class Document
 {
 public:
     explicit Document(eacp::FilePath pathToUse,
-                      Durability durabilityToUse = Durability::Durable)
+                      Durability durabilityToUse = Durability::Durable,
+                      Format formatToUse = Format::Json)
         : path(std::move(pathToUse))
         , durability(durabilityToUse)
+        , format(formatToUse)
+    {
+    }
+
+    Document(eacp::FilePath pathToUse,
+             Format formatToUse,
+             Durability durabilityToUse = Durability::Durable)
+        : Document(std::move(pathToUse), durabilityToUse, formatToUse)
     {
     }
 
@@ -79,8 +143,57 @@ public:
             return false;
         }
         cache = value;
+        journal = {}; // persist() writes a plain document, not a journal
         stamp = detail::stampFile(path);
         return true;
+    }
+
+    // Sets one entry of a map-shaped document, appending a journal frame
+    // instead of rewriting the file (see Format::Binary in AtomicFile.h);
+    // under Format::Json it falls back to the whole-file write. Only
+    // compiles for T with map semantics — Collection is the caller.
+    template <typename V>
+    bool set(const std::string& key, const V& value)
+    {
+        eacp::Threads::assertMainThread();
+        auto* const guard = lockHandle();
+        if (guard == nullptr)
+            return false;
+        const auto held = eacp::IPC::ScopedLock {*guard, lockTimeout};
+        if (!held)
+            return false;
+
+        loaded();
+        (*cache)[key] = value;
+
+        if (format != Format::Binary)
+            return persistLocked();
+
+        return appendOrCompact(Miro::binaryJournalSet(key, value));
+    }
+
+    // Removes one entry of a map-shaped document by appending a tombstone
+    // frame. Removing an absent key is a successful no-op — nothing needs
+    // to reach the disk for the file to already mean "not there".
+    bool remove(const std::string& key)
+    {
+        eacp::Threads::assertMainThread();
+        auto* const guard = lockHandle();
+        if (guard == nullptr)
+            return false;
+        const auto held = eacp::IPC::ScopedLock {*guard, lockTimeout};
+        if (!held)
+            return false;
+
+        loaded();
+        if (cache->find(key) == cache->end())
+            return true;
+        cache->erase(key);
+
+        if (format != Format::Binary)
+            return persistLocked();
+
+        return appendOrCompact(Miro::binaryJournalRemove(key));
     }
 
     // Reads, hands the value to `fn` to edit in place, then persists it. The
@@ -104,13 +217,7 @@ public:
 
         loaded();
         std::forward<Fn>(fn)(*cache);
-        if (!persist(*cache))
-        {
-            cache.reset();
-            return false;
-        }
-        stamp = detail::stampFile(path);
-        return true;
+        return persistLocked();
     }
 
     const eacp::FilePath& filePath() const { return path; }
@@ -123,15 +230,107 @@ private:
         const auto current = detail::stampFile(path);
         if (!cache || !(current == stamp))
         {
+            // The file changed under us (or was never read): the append
+            // handle may pin a replaced inode, so let it go with the cache.
+            appender.close();
             const auto text = readTextFile(path);
-            cache = text ? Miro::createFromJSONString<T>(*text) : T {};
+            journal = text ? detail::journalStateOf(*text) : detail::JournalState {};
+            cache = text ? decode(*text) : T {};
             stamp = current;
         }
         return *cache;
     }
 
+    // Persists the cached value whole (called with the lock held). Any
+    // whole-value write leaves a plain document behind, so the journal
+    // bookkeeping resets.
+    bool persistLocked()
+    {
+        if (!persist(*cache))
+        {
+            cache.reset();
+            journal = {};
+            return false;
+        }
+        journal = {};
+        stamp = detail::stampFile(path);
+        return true;
+    }
+
+    // The binary write path for single-entry changes: append the frame when
+    // the file is already a healthy journal with a modest tail, otherwise
+    // rewrite the whole current value as a fresh journal base (one atomic
+    // write — this is both the "convert whatever was there" step and the
+    // compaction that stops a long-lived journal growing without bound).
+    bool appendOrCompact(const Miro::Binary::Buffer& frame)
+    {
+        if (journal.active && !journal.damaged
+            && journal.tailBytes + frame.size() <= compactionLimit())
+        {
+            if ((appender.isOpen() || appender.open(path))
+                && appender.append(detail::asText(frame), durability))
+            {
+                journal.tailBytes += frame.size();
+                stamp = appender.stamp();
+                return true;
+            }
+
+            appender.close();
+            cache.reset();
+            journal = {};
+            return false;
+        }
+
+        appender.close(); // about to rename over the file
+        const auto bytes = Miro::toBinaryJournal(*cache);
+        if (!writeFileAtomically(path, detail::asText(bytes), durability))
+        {
+            cache.reset();
+            journal = {};
+            return false;
+        }
+        journal = {.active = true,
+                   .damaged = false,
+                   .baseBytes = bytes.size() - Miro::Binary::headerSize,
+                   .tailBytes = 0};
+        stamp = detail::stampFile(path);
+        return true;
+    }
+
+    // Appended frames may grow the file to roughly twice its compacted size
+    // before a write folds them into a fresh base; the floor stops tiny
+    // stores compacting on every write.
+    std::size_t compactionLimit() const
+    {
+        return std::max<std::size_t>(journal.baseBytes, std::size_t {4096});
+    }
+
+    // Decodes by what the file actually contains, not by `format` — so a
+    // store reopened under the other format keeps reading its old files and
+    // converts them on the next write.
+    static T decode(const std::string& bytes)
+    {
+        if (detail::looksBinary(bytes))
+            return Miro::createFromBinary<T>(std::span {
+                reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()});
+
+        return Miro::createFromJSONString<T>(bytes);
+    }
+
     bool persist(const T& value)
     {
+        appender.close(); // every persist renames over the file
+
+        if (format == Format::Binary)
+        {
+            const auto bytes = Miro::toBinary(value);
+            return writeFileAtomically(
+                path,
+                std::string_view {reinterpret_cast<const char*>(bytes.data()),
+                                  bytes.size()},
+                durability);
+        }
+
         return writeFileAtomically(
             path, Miro::toJSONString(value, 2) + "\n", durability);
     }
@@ -161,8 +360,15 @@ private:
 
     eacp::FilePath path;
     Durability durability;
+    Format format;
     std::optional<T> cache;
     detail::FileStamp stamp;
+    detail::JournalState journal;
+
+    // The journal's write handle, opened lazily by the first append and kept
+    // open across appends — one write syscall per frame. Closed whenever the
+    // file is renamed over or reloaded (see AppendFile).
+    AppendFile appender;
 
     // One interprocess lock per document, named by the document's path — eacp
     // keys it to a lock file of its own, so nothing lands beside the document

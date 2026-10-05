@@ -16,6 +16,18 @@ build:
 test: build
     ctest --test-dir build -C Release --output-on-failure
 
+# CPM_<pkg>_SOURCE points the build at a local checkout instead of the GitHub
+# fetch — for developing emberstore against uncommitted Miro changes. Uses its
+# own build dir so the override never poisons the regular build's CPM cache.
+[doc('Configure + build against a local Miro checkout')]
+build-local miro="../Miro":
+    cmake -B build-local -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCPM_Miro_SOURCE={{absolute_path(miro)}}
+    cmake --build build-local --config Release -j
+
+[doc('Build + run the tests against a local Miro checkout')]
+test-local miro="../Miro": (build-local miro)
+    ctest --test-dir build-local -C Release --output-on-failure
+
 # The perf guard is excluded: its timing bounds only mean something
 # un-instrumented, and ASan always trips them.
 [doc('Build + run the tests under AddressSanitizer')]

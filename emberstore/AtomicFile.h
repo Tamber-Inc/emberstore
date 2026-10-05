@@ -25,6 +25,28 @@ enum class Durability
     Durable,
 };
 
+// The on-disk encoding a store writes. Reads always sniff the file's actual
+// content — a Binary store opens a legacy JSON file and vice versa — so the
+// format only decides what the next write emits, and switching it never
+// strands existing data.
+//
+//   Json — pretty-printed text: greppable, diffable, hand-editable.
+//   Binary — Miro's packed wire format ("MIB1"): a fraction of the size,
+//     several times faster to encode/decode, and floats round-trip bit-exact
+//     instead of via decimal text.
+enum class Format
+{
+    Json,
+    Binary,
+};
+
+// If `target` is absent and `legacy` exists, renames legacy → target so a
+// Database opened under a new Format adopts the store file the old format
+// left behind (the content is converted on the next write; reads sniff it
+// either way). Best effort: on failure the legacy file is simply left in
+// place and the target starts empty.
+void adoptLegacyFile(const eacp::FilePath& legacy, const eacp::FilePath& target);
+
 // nullopt when the file is absent or unreadable (an empty file reads as "").
 std::optional<std::string> readTextFile(const eacp::FilePath& path);
 
@@ -42,7 +64,9 @@ namespace detail
 {
 // A cheap identity for a file's contents — last-write time plus size. Two
 // absent files compare equal. Lets a cached parse be validated with a stat
-// instead of re-reading and re-parsing the file.
+// instead of re-reading and re-parsing the file. Only ever compared against
+// other stamps from this process, so the tick unit is whatever the platform
+// stat call reports — it is never persisted.
 struct FileStamp
 {
     bool exists = false;
@@ -54,4 +78,49 @@ struct FileStamp
 
 FileStamp stampFile(const eacp::FilePath& path);
 } // namespace detail
+
+// A file held open for repeated appends — the journal's write handle. One
+// open(), then each append() costs a single write syscall instead of an
+// open/write/close round trip, which is most of the distance between
+// appending a journal frame and a WAL insert in something like SQLite.
+//
+// Not atomic like writeFileAtomically — a crash mid-append can leave a
+// partial tail, which is why only the binary journal writes this way: its
+// reader validates each frame (length + checksum) and drops a torn tail, so
+// a failed append is indistinguishable from one that never happened. Durable
+// appends flush to disk after each write.
+//
+// The handle pins the inode it opened, not the path: close it before
+// renaming over the file (Windows refuses the rename outright) and whenever
+// the file may have been replaced from outside.
+class AppendFile
+{
+public:
+    AppendFile() = default;
+    ~AppendFile();
+
+    AppendFile(AppendFile&& other) noexcept;
+    AppendFile& operator=(AppendFile&& other) noexcept;
+    AppendFile(const AppendFile&) = delete;
+    AppendFile& operator=(const AppendFile&) = delete;
+
+    // Opens path for appending, creating the file if absent; an already-open
+    // handle is closed first. Returns false and logs on failure.
+    bool open(const eacp::FilePath& path);
+
+    bool isOpen() const;
+    void close();
+
+    // Appends bytes at the current end of the file.
+    bool append(std::string_view bytes, Durability durability);
+
+    // The same identity stampFile(path) would compute, taken from the open
+    // handle — one syscall, no path lookup. Empty when nothing is open.
+    detail::FileStamp stamp() const;
+
+private:
+    // int fd on POSIX, HANDLE on Windows — held as an integer so this header
+    // needs no <windows.h>.
+    std::intptr_t handle = -1;
+};
 } // namespace emberstore
