@@ -113,7 +113,7 @@ public:
 
     // query().where(predicate), but filtered straight off the stored documents
     // so only the matches are copied rather than the whole collection.
-    Query<T> where(std::function<bool(const T&)> predicate)
+    Query<T> where(const std::function<bool(const T&)>& predicate)
     {
         eacp::Threads::assertMainThread();
         auto matches = std::vector<T> {};

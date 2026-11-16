@@ -121,7 +121,7 @@ auto tMutateEditsInPlace =
         [](Settings& s)
         {
             s.version = 2;
-            s.tags.push_back("t");
+            s.tags.emplace_back("t");
         }));
 
     auto reopened = emberstore::Document<Settings> {dir.file()};

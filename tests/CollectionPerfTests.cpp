@@ -65,6 +65,7 @@ auto tMillionRowSearch =
     // Build the rows once and seed the file in a single write (Atomic skips the
     // fsync — this is a throughput test, not a durability one).
     auto data = std::map<std::string, Row> {};
+    // NOLINTNEXTLINE(cert-msc51-cpp): a fixed seed keeps the timed rows the same on every run
     auto rng = std::mt19937 {0xABCDEFu};
     for (int i = 0; i < rowCount; ++i)
         data.emplace("row-" + std::to_string(i),
