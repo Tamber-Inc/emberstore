@@ -48,9 +48,9 @@ struct FileWatcher::Impl
         // Everything that can end with the watched name holding new bytes. The
         // writer's rename lands as IN_MOVED_TO; an in-place write ends at
         // IN_CLOSE_WRITE; IN_MODIFY covers a writer that never closes.
-        constexpr auto mask = std::uint32_t {IN_CLOSE_WRITE | IN_MOVED_TO
-                                             | IN_MOVED_FROM | IN_CREATE
-                                             | IN_DELETE | IN_MODIFY};
+        constexpr auto mask =
+            std::uint32_t {IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_CREATE
+                           | IN_DELETE | IN_MODIFY};
 
         watch = ::inotify_add_watch(inotifyFd, directory.c_str(), mask);
 
