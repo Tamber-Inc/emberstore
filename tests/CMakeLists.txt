@@ -2,7 +2,8 @@ if (NOT TARGET NanoTest)
     CPMAddPackage(
             NAME NanoTest
             GITHUB_REPOSITORY eyalamirmusic/NanoTest
-            GIT_TAG main)
+            GIT_TAG main
+            EXCLUDE_FROM_ALL YES)
 endif ()
 
 # Test entry point + helpers for real multi-process file contention. Link this

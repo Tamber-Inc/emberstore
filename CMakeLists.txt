@@ -31,14 +31,16 @@ if (NOT TARGET eacp-core)
     CPMAddPackage(
             NAME eacp
             GITHUB_REPOSITORY eyalamirmusic/eacp
-            GIT_TAG main)
+            GIT_TAG main
+            EXCLUDE_FROM_ALL YES)
 endif ()
 
 if (NOT TARGET Miro)
     CPMAddPackage(
             NAME Miro
             GITHUB_REPOSITORY eyalamirmusic/Miro
-            GIT_TAG main)
+            GIT_TAG main
+            EXCLUDE_FROM_ALL YES)
 endif ()
 
 add_library(emberstore STATIC
