@@ -1,5 +1,7 @@
 #include "ContestFile.h"
 
+#include <emberstore/Emberstore.h>
+
 #include <eacp/Core/Utils/Containers.h>
 #include <eacp/Network/IPC/Lock.h>
 
@@ -57,6 +59,19 @@ int runIfContestInvocation(int argc, char** argv)
         return 0;
     }
 
+    // Appends <count> docs "<prefix>-<i>" to a binary collection through
+    // Document's own lock, reporting how many writes failed.
+    if (mode == "journal")
+    {
+        auto docs = Collection<int> {path, Durability::Atomic, Format::Binary};
+        auto failed = 0;
+        for (auto i = 0; i < journalWritesPerProcess; ++i)
+            if (!docs.set(arg + "-" + std::to_string(i), i))
+                ++failed;
+        std::printf("failed %d\n", failed);
+        return 0;
+    }
+
     // path is the lock *name* the Document locks under (its file path); eacp
     // maps it to a lock file of its own, so contending here is real contention.
     auto lock = eacp::IPC::Lock {path};
@@ -96,6 +111,14 @@ std::string runContender(const std::string& mode,
     const auto result =
         eacp::Processes::run(selfExecutable, contestArguments(path, mode, arg));
     return result.output;
+}
+
+std::unique_ptr<eacp::Processes::Process>
+    startJournalWriter(const std::string& path, const std::string& prefix)
+{
+    auto child = std::make_unique<eacp::Processes::Process>(
+        selfExecutable, contestArguments(path, "journal", prefix));
+    return child->launched() ? std::move(child) : nullptr;
 }
 
 std::unique_ptr<eacp::Processes::Process> startLockHolder(const std::string& path,

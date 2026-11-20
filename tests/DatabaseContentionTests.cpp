@@ -211,3 +211,29 @@ auto tRealProcessIsExcludedForTheWholeMutate =
     check(sawBusy);
     check(doc.read().level == 2);
 };
+
+// Two real processes appending to one binary journal at once — interleaved
+// frames, compactions renaming the file under the other's append handle —
+// and afterwards a fresh handle sees every doc from both.
+auto tRealProcessesShareAJournal = test(
+    "Contention/two processes appending to one binary journal lose nothing") = []
+{
+    auto dir = TempDir {};
+    auto db = emberstore::Database {dir.path(), Format::Binary};
+    const auto path = (dir.root / "shared.ember").string();
+
+    auto a = testing::startJournalWriter(path, "a");
+    auto b = testing::startJournalWriter(path, "b");
+    check(a != nullptr && b != nullptr);
+    a->wait();
+    b->wait();
+
+    // The per-write lock timeout is 250ms; failures would mean lost docs.
+    check(a->output().find("failed 0") != std::string::npos);
+    check(b->output().find("failed 0") != std::string::npos);
+
+    auto shared = db.collection<int>("shared");
+    check(shared.size() == 2 * testing::journalWritesPerProcess);
+    check(shared.doc("a-199").get() == 199);
+    check(shared.doc("b-0").get() == 0);
+};

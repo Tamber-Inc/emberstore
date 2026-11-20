@@ -21,8 +21,17 @@ inline eacp::FilePath appDataDirectory(std::string_view company,
 
 inline Database databaseForApp(std::string_view company,
                                std::string_view appName,
+                               Durability durability = Durability::Durable,
+                               Format format = Format::Json)
+{
+    return Database {appDataDirectory(company, appName), durability, format};
+}
+
+inline Database databaseForApp(std::string_view company,
+                               std::string_view appName,
+                               Format format,
                                Durability durability = Durability::Durable)
 {
-    return Database {appDataDirectory(company, appName), durability};
+    return databaseForApp(company, appName, durability, format);
 }
 } // namespace emberstore

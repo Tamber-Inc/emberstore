@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>emberstore byte layout</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>emberstore binary, byte by byte</h1>
+  <p class="intro">Each example below is a real C++ value encoded by <code>Calder::toBinary</code>. Every byte is labelled by walking the result with Calder's own decoder (<code>parseValueHeader</code>, <code>ByteReader</code>, <code>ObjectEntryCursor</code>). Hover a byte to see what it is and why it is there; click to keep it selected. Click a value in the tree to see all of its bytes.</p>
+  <nav id="example-tabs" aria-label="Examples"></nav>
+</header>
+
+<details id="format-legend" open>
+  <summary>The format in brief</summary>
+  <div class="legend-columns">
+    <pre>file      := "CLD1" | u32 keyTableOffset | value | keyTable
+keyTable  := varint keyCount | { varint length | bytes }*
+value     := tag byte | payload
+
+Null / False / True   no payload
+Int          zigzag varint
+Double       8 IEEE-754 bytes
+Float32      4 bytes, when the double survives float
+String       varint byteLength | UTF-8 bytes
+Object       u32 payloadSize | { varint keyId | value }*
+Map          u32 payloadSize | { varint keyLength | bytes | value }*
+Array        u32 payloadSize | u32 count | value*
+PackedFloat  u32 count | count × 4 bytes
+PackedDouble u32 count | count × 8 bytes
+PackedInt32  u32 payloadSize | u32 count | zigzag varints
+PackedInt64  u32 payloadSize | u32 count | zigzag varints</pre>
+    <ul class="legend-notes">
+      <li><b>u32</b>: 4 bytes, little-endian, so the lowest byte comes first: <code>5d 00 00 00</code> is 93.</li>
+      <li><b>varint</b>: 7 bits of the number per byte, lowest bits first. A byte's top bit is 1 when another byte follows. Numbers below 128 take one byte.</li>
+      <li><b>zigzag</b>: signed numbers are mapped to unsigned ones before the varint (0→0, −1→1, 1→2, −2→3), so small negative numbers stay one byte.</li>
+      <li><b>payloadSize</b> counts the bytes after the size field itself, so a reader can jump over a whole container.</li>
+      <li><b>Field names</b> are stored once, in the key table at the end. Each field stores only its key id.</li>
+      <li><b>Packed arrays</b> (vectors of float, double, int, int64_t) have no tag per element. Other vectors tag every element.</li>
+    </ul>
+  </div>
+  <div id="role-legend" class="role-legend"></div>
+</details>
+
+<section id="example-summary"></section>
+
+<main>
+  <aside id="value-tree-panel">
+    <h2>Value tree</h2>
+    <div id="value-tree"></div>
+  </aside>
+  <section id="hex-panel">
+    <h2>Bytes</h2>
+    <div id="hex-grid" role="grid"></div>
+  </section>
+  <aside id="detail-panel">
+    <h2>Selected</h2>
+    <div id="detail"><p class="muted">Hover or click a byte, or click a value in the tree.</p></div>
+  </aside>
+</main>
+
+<section id="array-costs"></section>
+
+<section class="source-columns">
+  <div>
+    <h2>C++</h2>
+    <pre id="cpp-source"></pre>
+  </div>
+  <div>
+    <h2>The same value as JSON</h2>
+    <pre id="json-source"></pre>
+  </div>
+</section>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

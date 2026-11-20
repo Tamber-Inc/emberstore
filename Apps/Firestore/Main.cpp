@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -134,6 +135,18 @@ std::vector<std::string> pathSegments(const std::string& path)
             out.push_back(segment);
 
     return out;
+}
+
+// Collection names become file names under the store root, so anything
+// beyond [A-Za-z0-9_-] (a separator, "..") is refused. Ids get the same rule
+// for symmetry.
+bool isSafeName(const std::string& name)
+{
+    return !name.empty()
+           && std::all_of(name.begin(),
+                          name.end(),
+                          [](unsigned char c)
+                          { return std::isalnum(c) || c == '_' || c == '-'; });
 }
 
 Note benchNote(int index)
@@ -248,7 +261,8 @@ eacp::HTTP::Response handleDocument(Store& store,
 
     if (req.type == "DELETE")
     {
-        collection.remove(id);
+        if (!collection.remove(id))
+            return plain(500, "remove failed\n");
         return json(200, "{ \"ok\": true }");
     }
 
@@ -276,6 +290,10 @@ eacp::HTTP::Response handle(Store& store, const eacp::HTTP::Request& req)
 
         return plain(200, runBench(store, count, durability));
     }
+
+    if (segments[0] == "d"
+        && !std::all_of(segments.begin() + 1, segments.end(), isSafeName))
+        return plain(400, "names and ids must be [A-Za-z0-9_-]\n");
 
     if (segments[0] == "d" && segments.size() == 2 && req.type == "GET")
     {

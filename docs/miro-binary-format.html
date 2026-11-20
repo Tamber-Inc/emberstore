@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>emberstore binary format (MIB1 / MIBJ) — briefing</title>
+<style>
+:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1d1d1b; --muted:#66655f; --rule:#dddcd6; --code:#f0efea; --accent:#2a5db0; --warn:#a2471a; }
+@media (prefers-color-scheme: dark) { :root { --bg:#17171a; --fg:#e6e5e0; --muted:#9a9993; --rule:#34343a; --code:#222228; --accent:#8db4ff; --warn:#f0a070; } }
+body { background:var(--bg); color:var(--fg); font:16px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; max-width:58rem; margin:2.5rem auto; padding:0 1.25rem; }
+h1 { font-size:1.7rem; margin-bottom:.2rem; } h2 { margin-top:2.6rem; border-bottom:1px solid var(--rule); padding-bottom:.3rem; } h3 { margin-top:1.8rem; }
+.meta { color:var(--muted); font-size:.9rem; }
+code, pre { font:13.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; background:var(--code); border-radius:4px; }
+code { padding:.05rem .3rem; } pre { padding:.75rem .9rem; overflow-x:auto; }
+table { border-collapse:collapse; width:100%; margin:1rem 0; font-size:.92rem; }
+th, td { text-align:left; vertical-align:top; padding:.4rem .55rem; border-bottom:1px solid var(--rule); }
+th { color:var(--muted); font-weight:600; } td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+td pre { margin:0; padding:.3rem .45rem; white-space:pre-wrap; word-break:break-all; }
+.warn { color:var(--warn); } .note { color:var(--muted); font-size:.9rem; }
+a { color:var(--accent); }
+</style>
+</head>
+<body>
+<h1>emberstore binary format</h1>
+<p class="meta">MIB1 documents and MIBJ journals · code in emberstore <code>emberstore/Binary</code> (<code>jp/binary</code> working tree), on Miro <code>jamierpond/Miro@8a5f64a8</code> (jp/reflector-hooks) · 2026-11-11</p>
+
+<h2>1. What it is</h2>
+<p>Saving a Miro-reflected struct as JSON is slow and big, and changing one entry of a large map meant rewriting the whole JSON file. emberstore now has a binary encoding (<code>emberstore::toBinary</code> / <code>fromBinary</code>, in <code>emberstore/Binary</code>) that works on any type that already has a <code>MIRO_REFLECT</code>, no schema file or code generator. It lives in emberstore, not Miro: Miro only carries the format-agnostic hooks it is built on (<code>Reflector::visitPacked()</code>, range-checked number loading, missing containers keeping their defaults). emberstore uses its append-only journal form so a single-entry write adds a small frame to the end of the file instead of rewriting it.</p>
+
+<h2>2. How the format works</h2>
+<p>Every dump below came from a throwaway program built before the code moved from Miro to <code>emberstore/Binary</code>; the move changed only namespaces and include paths, not the bytes written. Bytes are hex; the first 8 bytes of every document are the header.</p>
+
+<h3>Document layout</h3>
+<pre>file     := "MIB1" | u32 keyTableOffset | value | keyTable
+keyTable := varint keyCount | { varint length | bytes }*
+value    := tag byte | payload</pre>
+<p>Every value starts with a one-byte tag (0 Null, 1 False, 2 True, 3 Int, 4 Double, 5 Float32, 6 String, 7 Object, 8 Map, 9 Array, 10 PackedFloat, 11 PackedDouble, 12 PackedInt32, 13 PackedInt64). Object field names are not written inline: each distinct name is stored once in a key table at the end of the file and fields refer to it by a varint index. Every container carries its byte size up front, so a reader can skip it without parsing it.</p>
+<p>Fixed sizes (header offset, container sizes, counts, floats) are little-endian on every host. Each field is built byte by byte with shifts, and whole packed arrays are copied in one go only when the host is little-endian too, so a big-endian machine writes and reads the same bytes. All sizes are <code>u32</code>, so a single document or container is capped at 4 GiB.</p>
+
+<h3>Every type, with real bytes</h3>
+<p class="note">Header bytes <code>4d 49 42 31</code> = "MIB1", then the u32 key-table offset. A trailing <code>00</code> is an empty key table.</p>
+<table>
+<tr><th>Source value</th><th>Encoding</th><th>Bytes</th></tr>
+<tr><td><code>int 0</code></td><td>Int tag, zigzag varint</td><td><pre>4d 49 42 31 0a 00 00 00 <b>03 00</b> 00</pre></td></tr>
+<tr><td><code>int 1</code></td><td>zigzag(1) = 2</td><td><pre>… <b>03 02</b> 00</pre></td></tr>
+<tr><td><code>int -1</code></td><td>zigzag(-1) = 1</td><td><pre>… <b>03 01</b> 00</pre></td></tr>
+<tr><td><code>int 300</code></td><td>zigzag 600 = varint <code>d8 04</code></td><td><pre>… <b>03 d8 04</b> 00</pre></td></tr>
+<tr><td><code>int64 1&lt;&lt;40</code></td><td>same Int tag; all integer widths share it</td><td><pre>… <b>03 80 80 80 80 80 40</b> 00</pre></td></tr>
+<tr><td><code>double 1.5</code></td><td>fits a float exactly, so Float32 (4 bytes)</td><td><pre>… <b>05 00 00 c0 3f</b> 00</pre></td></tr>
+<tr><td><code>double 0.1</code></td><td>doesn't fit, so Double (8 bytes)</td><td><pre>… <b>04 9a 99 99 99 99 99 b9 3f</b> 00</pre></td></tr>
+<tr><td><code>float 0.1f</code></td><td>Float32</td><td><pre>… <b>05 cd cc cc 3d</b> 00</pre></td></tr>
+<tr><td><code>bool true / false</code></td><td>the tag is the value, no payload</td><td><pre>… <b>02</b> 00   /   … <b>01</b> 00</pre></td></tr>
+<tr><td><code>string "hi"</code></td><td>varint byte length, UTF-8 bytes</td><td><pre>… <b>06 02 68 69</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;int&gt;{1,2,3}</code></td><td>PackedInt32: u32 size, u32 count, zigzag varints</td><td><pre>… <b>0c 07 00 00 00 03 00 00 00 02 04 06</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;int64&gt;{1,-2}</code></td><td>PackedInt64, same shape</td><td><pre>… <b>0d 06 00 00 00 02 00 00 00 02 03</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;float&gt;{1.5f,2.5f}</code></td><td>PackedFloat: u32 count, raw floats (no size field)</td><td><pre>… <b>0a 02 00 00 00 00 00 c0 3f 00 00 20 40</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;double&gt;{0.5,0.25}</code></td><td>all fit float, so narrowed to PackedFloat</td><td><pre>… <b>0a 02 00 00 00 00 00 00 3f 00 00 80 3e</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;double&gt;{0.1,0.2}</code></td><td>PackedDouble</td><td><pre>… <b>0b 02 00 00 00 9a 99 99 99 99 99 b9 3f 9a 99 99 99 99 99 c9 3f</b> 00</pre></td></tr>
+<tr><td><code>vector&lt;string&gt;{"a","b"}</code></td><td>Array: u32 size, u32 count, tagged values</td><td><pre>… <b>09 0a 00 00 00 02 00 00 00 06 01 61 06 01 62</b> 00</pre></td></tr>
+<tr><td><code>map&lt;string,int&gt;{a:1,b:2}</code></td><td>Map: u32 size, then inline key + value pairs (map keys are data, not interned)</td><td><pre>… <b>08 08 00 00 00 01 61 03 02 01 62 03 04</b> 00</pre></td></tr>
+<tr><td><code>struct Point{x=1,y=2}</code></td><td>Object: u32 size, then (key id, value) pairs; key table <code>02 01 78 01 79</code> = ["x","y"]</td><td><pre>… <b>07 06 00 00 00 00 03 02 01 03 04</b> 02 01 78 01 79</pre></td></tr>
+<tr><td><code>Line{a={1,2}, b={3,4}}</code></td><td>nested Objects share one key table ["a","x","y","b"]</td><td><pre>… <b>07 18 00 00 00 00 07 06 00 00 00 01 03 02 02 03 04 03 07 06 00 00 00 01 03 06 02 03 08</b> 04 01 61 01 78 01 79 01 62</pre></td></tr>
+<tr><td><code>vector&lt;Rec{id,n}&gt;</code> ×2</td><td>Array of Objects; "id" and "n" stored once for all elements</td><td><pre>… 09 1c 00 00 00 02 00 00 00 07 07 00 00 00 00 03 02 01 06 01 61 07 07 00 00 00 00 03 04 01 06 01 62 | 02 02 69 64 01 6e</pre></td></tr>
+<tr><td><code>optional&lt;int&gt; o = 7</code></td><td>just the value</td><td><pre>… 07 03 00 00 00 00 <b>03 0e</b> 01 01 6f</pre></td></tr>
+<tr><td><code>optional&lt;int&gt; o = empty</code></td><td>key kept, value is Null</td><td><pre>… 07 02 00 00 00 00 <b>00</b> 01 01 6f</pre></td></tr>
+<tr><td><code>enum Colour m = Blue</code></td><td>the enumerator's name as a String</td><td><pre>… 07 07 00 00 00 00 <b>06 04 42 6c 75 65</b> 01 01 6d</pre></td></tr>
+<tr><td><code>variant&lt;int,string&gt; v = 5</code></td><td>an Object with one field named after the alternative's type ("int")</td><td><pre>… 07 09 00 00 00 00 <b>07 03 00 00 00 01 03 0a</b> 02 01 76 03 69 6e 74</pre></td></tr>
+<tr><td><code>variant&lt;int,string&gt; v = "x"</code></td><td>same, field "string"</td><td><pre>… 00 <b>07 04 00 00 00 01 06 01 78</b> 02 01 76 06 73 74 72 69 6e 67</pre></td></tr>
+</table>
+<p>Fields wrapped in <code>Omittable&lt;T&gt;</code> are dropped entirely, key and all, when absent; plain <code>std::optional</code> writes a Null.</p>
+
+<h3>Fields are identified by name, not position</h3>
+<p>Fields are tagged, and the tag is the field's name (via the key table), not a number. Field order in the file doesn't matter: the reader keeps a cursor so reading in written order is one step per field, and falls back to scanning when the order differs. Results from the dump program:</p>
+<table>
+<tr><th>Schema change</th><th>What happened</th></tr>
+<tr><td>Field added (old file, new struct)</td><td>Loads; the new field keeps its default (<code>id=7 name=seven extra=1</code>).</td></tr>
+<tr><td>Field removed (new file, old struct)</td><td>Loads; the unknown field is ignored (<code>id=8 name=eight</code>).</td></tr>
+<tr><td>Field renamed</td><td>Value is lost silently; the field keeps its default unless the struct's own <code>reflect()</code> reads the old name.</td></tr>
+<tr><td>Field type changed (int → string)</td><td>The field keeps its default (<code>id=unchanged</code>), and <code>fromBinary</code> returns a <code>BinaryLoadReport</code> listing it: field path <code>id</code>, stored Number, expected String. Loads still never throw.</td></tr>
+<tr><td>Enumerator or variant type renamed</td><td>Breaks old data: both are stored by name (enum <code>"Blue"</code>, variant key <code>"int"</code>).</td></tr>
+</table>
+<p>The format is self-describing: every value has a type tag and every field its name, so a reader with no struct definition can walk a file (that is what <code>Binary::View</code> does). What it doesn't record is the C++ type: <code>int</code> vs <code>int64</code>, <code>float</code> vs <code>double</code> all collapse to Int / Float32 / Double.</p>
+
+<h3>Random access without decoding</h3>
+<p><code>Binary::Document</code> + <code>View</code> let you read <code>doc["tracks"][7]["title"]</code> by skipping siblings via their size prefixes. Opening a Document still reads the whole key table into a hash map, and indexing into a non-packed array is O(index). Data is unaligned, so this is "read in place", not Cap'n Proto-style "cast the bytes to a struct".</p>
+
+<h2>3. emberstore's journal</h2>
+<p>Problem: a <code>Collection</code> is one file holding a whole map; with JSON, every insert rewrote the file (3.2 s for 2000 inserts, below). Now a binary collection appends one frame per insert or delete and only rewrites the file once the appended tail has grown as large as the base.</p>
+<pre>journal := "MIBJ" | u32 baseSize | baseDoc (a full MIB1 file) | frame*
+frame   := u8 kind (1 set, 2 remove) | u32 payloadSize | payload | u32 fnv1a(payload)
+payload := varint keyLength | key | [valueDoc, a full MIB1 file, for set]</pre>
+<p>Real bytes, base <code>{a:1}</code>, then <code>set b=2</code>, then <code>remove a</code>:</p>
+<pre>4d 49 42 4a 12 00 00 00 | 4d 49 42 31 11 00 00 00 08 04 00 00 00 01 61 03 02 00     MIBJ, base = {a:1}
+01 0d 00 00 00 | 01 62 4d 49 42 31 0a 00 00 00 03 04 00 | c4 0f c4 35             set "b" = 2
+02 02 00 00 00 | 01 61 | 17 b6 74 4c                                              remove "a"
+replayed → {b:2}</pre>
+<ul>
+<li><b>Checksum:</b> 32-bit FNV-1a over the payload only. The kind byte and length aren't covered by it; a flipped kind (set ↔ remove) passes the check. FNV-1a catches torn writes fine but is weaker than a CRC against real corruption.</li>
+<li><b>Torn writes:</b> the reader validates frames in order and stops at the first one whose length runs past the end of the file (cutting the last byte above: <code>truncated=1, frames=1</code>, result <code>a=1 b=2</code>, the remove is lost). emberstore marks the journal damaged and the next write compacts, which rewrites the file cleanly. A frame whose length still fits the file but whose kind, checksum or key is corrupt is skipped, and the frames after it still load; <code>JournalInfo::skippedFrameCount</code> and the load report count it. emberstore doesn't yet compact on a skipped frame, only on a torn tail.</li>
+<li><b>Compaction:</b> an append goes ahead while <code>tailBytes + frame ≤ max(baseBytes, 4096)</code>; otherwise the whole current map is written as a fresh journal via temp file + rename (fsync'd when Durable). So the file is at most about twice its compacted size.</li>
+<li><b>Frame size:</b> each set frame embeds a complete MIB1 document, header and key table included, so every frame repeats the struct's field names. That's why one "nested" entry frame is 1407 bytes.</li>
+<li><b>Appends</b> go through a persistent file handle, one <code>write()</code> per frame (POSIX); Windows reopens the file per append.</li>
+<li><code>Binary::View</code> refuses journals (it would miss the frames); only <code>fromBinary</code> into a <code>std::map&lt;std::string, V&gt;</code> replays them.</li>
+</ul>
+
+<h2>4. Compared with other formats</h2>
+<table>
+<tr><th></th><th>MIB1</th><th>Protobuf</th><th>Cap'n Proto</th><th>FlatBuffers</th><th>MessagePack / CBOR</th></tr>
+<tr><td>Schema file needed</td><td>No (C++ struct + MIRO_REFLECT)</td><td>Yes (.proto)</td><td>Yes (.capnp)</td><td>Yes (.fbs)</td><td>No</td></tr>
+<tr><td>Code generator</td><td>No</td><td>Yes</td><td>Yes</td><td>Yes</td><td>No</td></tr>
+<tr><td>Field identity</td><td>Name, interned once per file</td><td>Field number</td><td>Position in struct (ordinals)</td><td>vtable slot (field id)</td><td>Name repeated inline every time (or int keys by convention)</td></tr>
+<tr><td>Self-describing</td><td>Yes</td><td>No</td><td>No</td><td>No</td><td>Yes</td></tr>
+<tr><td>Zero-copy reads</td><td>Partial: navigate in place, typed load copies</td><td>No</td><td>Yes</td><td>Yes</td><td>No (some libs give string views)</td></tr>
+<tr><td>Add / remove field</td><td>Yes</td><td>Yes</td><td>Add only at end; never remove</td><td>Add at end; deprecate, not remove</td><td>Yes (application's job)</td></tr>
+<tr><td>Rename field</td><td>Only with a hand-written migration in <code>reflect()</code></td><td>Free (number unchanged)</td><td>Free</td><td>Free</td><td>Breaks</td></tr>
+<tr><td>Type mismatch</td><td>Field keeps default; reported by path in the load report</td><td>Wire-type error or reinterpret</td><td>Must not change</td><td>Must not change</td><td>Application's job</td></tr>
+<tr><td>Size</td><td>Measured: 1.1×–4.5× smaller than compact JSON (§5)</td><td>Not measured</td><td>Not measured (fixed widths + padding, usually larger)</td><td>Not measured</td><td>Not measured</td></tr>
+<tr><td>Speed</td><td>Measured vs Miro JSON only (§5)</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td></tr>
+</table>
+<p class="note">Rows other than MIB1's describe those formats' documented designs; none of them were benchmarked here.</p>
+<p><b>Where MIB1 wins:</b> no schema file and no codegen; existing reflected types gain a binary form for free; arrays of records pay for field names once, unlike MessagePack/CBOR; numeric vectors are packed (embeddings are 4.5× smaller than JSON and encode ~140× faster); and the journal gives cheap single-entry appends with torn-tail recovery.</p>
+<p><b>Where it's weaker:</b> renames need care (a rename loses the value silently unless <code>reflect()</code> migrates it by hand); per-value overhead is high next to protobuf (5 bytes per object header, 9 per array, a tag byte per value), so small flat records end up barely smaller than JSON (nested shape: 1.13×; a single settings struct is <i>larger</i> than its JSON, 113 vs 110 bytes); no real zero-copy; 4 GiB limits; only one implementation (C++), so no other language can read it today.</p>
+
+<h2>5. Receipts</h2>
+<p class="meta">Apple M5 Max (<code>hw.model</code> Mac17,7), macOS 27.0.1, 2026-11-10. emberstore <code>build-deps</code> (CMAKE_BUILD_TYPE=Release, already up to date with the working tree). Sqlitestore bench run 3 times; median shown, all three runs listed.</p>
+
+<h3>Sqlitestore <code>/bench</code> (port 8081)</h3>
+<table>
+<tr><th>Test</th><th>Store</th><th class="num">Median</th><th class="num">Rate</th><th class="num">On disk</th><th>All runs (ms)</th></tr>
+<tr><td rowspan="3">2000 inserts, no fsync</td><td>SQLite (WAL, sync OFF)</td><td class="num">35.8 ms</td><td class="num">55,806/s</td><td class="num">356 KB</td><td>29.7, 55.6, 35.8</td></tr>
+<tr><td>ember JSON</td><td class="num">3,223 ms</td><td class="num">620/s</td><td class="num">356 KB</td><td>3223, 3415, 3186</td></tr>
+<tr><td>ember binary</td><td class="num">16.5 ms</td><td class="num">121,372/s</td><td class="num">242 KB</td><td>17.0, 16.5, 15.9</td></tr>
+<tr><td rowspan="3">500 inserts, fsync each</td><td>SQLite (WAL, sync FULL)</td><td class="num">43.4 ms</td><td class="num">11,523/s</td><td class="num">96 KB</td><td>43.4, 44.9, 43.4</td></tr>
+<tr><td>ember JSON</td><td class="num">293.9 ms</td><td class="num">1,701/s</td><td class="num">88 KB</td><td>329.7, 293.9, 287.7</td></tr>
+<tr><td>ember binary</td><td class="num">18.7 ms</td><td class="num">26,696/s</td><td class="num">63 KB</td><td>23.7, 18.4, 18.7</td></tr>
+<tr><td rowspan="3">2000 point reads</td><td>SQLite</td><td class="num">5.9 ms</td><td class="num">338,743/s</td><td></td><td>5.9, 6.1, 5.8</td></tr>
+<tr><td>ember JSON</td><td class="num">2.3 ms</td><td class="num">874,173/s</td><td></td><td>2.4, 2.3, 2.3</td></tr>
+<tr><td>ember binary</td><td class="num">2.3 ms</td><td class="num">863,588/s</td><td></td><td>2.3, 2.3, 2.3</td></tr>
+</table>
+
+<h3>Is it a fair fight?</h3>
+<ul>
+<li><b>fsync is like-for-like, but neither side is truly durable on macOS.</b> emberstore calls plain <code>fsync()</code> (AtomicFile.cpp, AppendFile). SQLite's <code>PRAGMA fullfsync</code> defaults to off and the bench doesn't turn it on, so SQLite also calls plain <code>fsync()</code>. On macOS that hands data to the drive but doesn't flush the drive's own cache; only <code>F_FULLFSYNC</code> does. 500 "durable" binary writes in 18.7 ms is 37 µs each, far below a real flash flush. With <code>F_FULLFSYNC</code> on both sides, expect both to slow by orders of magnitude and the gap to narrow (not measured).</li>
+<li><b>Reads aren't comparable.</b> emberstore answers from an in-memory cache (one <code>stat</code> + map lookup, no decode); SQLite runs a prepared SELECT and parses the JSON body each time. The read rows measure the cache, not the format; that's why JSON and binary read at the same speed.</li>
+<li>SQLite stores JSON text as the row body, so its 356 KB matches ember JSON's; it isn't using a binary encoding.</li>
+<li>Insert timings include emberstore's compactions (whole-file rewrites) as they occur.</li>
+</ul>
+
+<h3>wiresize (in memory, no disk; compact JSON vs MIB1; ms per encode/decode)</h3>
+<table>
+<tr><th>Shape, n</th><th class="num">JSON B</th><th class="num">Binary B</th><th class="num">Ratio</th><th class="num">JSON enc</th><th class="num">JSON dec</th><th class="num">Bin enc</th><th class="num">Bin dec</th></tr>
+<tr><td>settings, 1</td><td class="num">110</td><td class="num">113</td><td class="num">0.97×</td><td class="num">0.001</td><td class="num">0.001</td><td class="num">0.001</td><td class="num">0.001</td></tr>
+<tr><td>settings, 10,000</td><td class="num">1,119,680</td><td class="num">388,737</td><td class="num">2.88×</td><td class="num">10.85</td><td class="num">11.44</td><td class="num">4.11</td><td class="num">4.56</td></tr>
+<tr><td>embeddings (64 floats), 10,000</td><td class="num">13,440,562</td><td class="num">2,998,618</td><td class="num">4.48×</td><td class="num">490.8</td><td class="num">69.4</td><td class="num">3.54</td><td class="num">3.38</td></tr>
+<tr><td>nested, 1</td><td class="num">199</td><td class="num">228</td><td class="num">0.87×</td><td class="num">0.002</td><td class="num">0.002</td><td class="num">0.001</td><td class="num">0.001</td></tr>
+<tr><td>nested, 10,000</td><td class="num">1,471,699</td><td class="num">1,298,753</td><td class="num">1.13×</td><td class="num">12.18</td><td class="num">10.76</td><td class="num">4.08</td><td class="num">4.53</td></tr>
+<tr><td>collection, 10,000</td><td class="num">416,781</td><td class="num">281,405</td><td class="num">1.48×</td><td class="num">5.49</td><td class="num">7.76</td><td class="num">2.10</td><td class="num">3.37</td></tr>
+</table>
+<table>
+<tr><th>Journal, n = 10,000</th><th class="num">JSON B</th><th class="num">Compacted base B</th><th class="num">Ratio</th><th class="num">One entry frame B</th></tr>
+<tr><td>settings</td><td class="num">1,218,570</td><td class="num">467,631</td><td class="num">2.61×</td><td class="num">122</td></tr>
+<tr><td>embeddings</td><td class="num">13,539,452</td><td class="num">3,077,512</td><td class="num">4.40×</td><td class="num">358</td></tr>
+<tr><td>nested</td><td class="num">15,025,561</td><td class="num">13,275,619</td><td class="num">1.13×</td><td class="num">1,407</td></tr>
+<tr><td>collection</td><td class="num">416,781</td><td class="num">281,413</td><td class="num">1.48×</td><td class="num">59</td></tr>
+</table>
+<p class="note">Single runs. Small single values are bigger in binary: the 8-byte header plus key table costs more than JSON's braces and quotes. Text-heavy nested data gains little because strings are stored as-is.</p>
+</body>
+</html>

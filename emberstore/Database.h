@@ -19,10 +19,9 @@ namespace emberstore
 //   auto users    = db.collection<Profile>("users");    // <root>/users.json
 //   users.doc("alice").set({"Alice", 1});
 //
-// The Format picks the extension (.json / .ember) and what writes emit.
-// Opening a database under a different format than last time just works: the
-// old store file is adopted (renamed) the first time a store handle is made,
-// reads sniff the actual content, and each store converts on its next write.
+// The Format picks the extension (.json / .ember) and what writes emit. It is
+// fixed per database: a store opened under the other format is a different
+// file.
 //
 // A thin handle factory — the returned stores own the IO and, like them, it is
 // message-thread only. Safe for a single app / process for now; an inter-process
@@ -66,18 +65,10 @@ private:
         return formatToUse == Format::Binary ? ".ember" : ".json";
     }
 
-    // Resolves the store file for this database's format, first adopting a
-    // file the other format left behind so a format switch keeps the data.
+    // The store file for this database's format. Pure path math, no IO.
     eacp::FilePath fileFor(std::string_view name) const
     {
-        const auto other = format == Format::Binary ? Format::Json : Format::Binary;
-        const auto target =
-            root / (std::string {name} + std::string {extensionFor(format)});
-        const auto legacy =
-            root / (std::string {name} + std::string {extensionFor(other)});
-
-        adoptLegacyFile(legacy, target);
-        return target;
+        return root / (std::string {name} + std::string {extensionFor(format)});
     }
 
     eacp::FilePath root;

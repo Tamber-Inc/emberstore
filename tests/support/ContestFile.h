@@ -18,6 +18,8 @@ namespace emberstore::testing
 //   hold <ms>    take the lock, report "locked", hold it that long, then exit
 //   crash        take the lock, report "locked", then die still holding it
 //   write <text> overwrite the file ignoring the lock, as an editor would
+//   journal <prefix>  set journalWritesPerProcess docs "<prefix>-<i>" in a
+//                binary Collection<int> at path, print "failed <n>"
 //
 // Needed because a second lock inside one process only proves the lock binds to
 // the descriptor. It says nothing about whether the lock actually crosses a
@@ -38,6 +40,13 @@ int runIfContestInvocation(int argc, char** argv);
 std::string runContender(const std::string& mode,
                          const std::string& path,
                          const std::string& arg = {});
+
+inline constexpr int journalWritesPerProcess = 200;
+
+// Launches a "journal" contender without waiting for it. Null if it never
+// started.
+std::unique_ptr<eacp::Processes::Process>
+    startJournalWriter(const std::string& path, const std::string& prefix);
 
 // Launches a contender that takes the lock and holds it, returning once the
 // child has *announced* it holds the lock — so a caller tests against a known

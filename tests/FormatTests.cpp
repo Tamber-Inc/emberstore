@@ -1,7 +1,6 @@
 // Tests for Format::Binary — the packed Miro wire format as a storage
-// encoding — and for moving a store between formats: reads sniff the actual
-// file content, Database adopts the other format's file on open, and each
-// store converts on its next write. Includes a size/speed comparison against
+// encoding — and for content sniffing: reads decode whatever the file
+// actually holds, regardless of the configured format. Includes a size/speed comparison against
 // the JSON encoding, printed for inspection; only the invariants are asserted.
 
 #include <emberstore/Emberstore.h>
@@ -11,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -48,11 +48,11 @@ std::string readRaw(const std::string& path)
     return std::string {std::istreambuf_iterator<char> {in}, {}};
 }
 
-// Either binary magic: "MIB1" (plain document) or "MIBJ" (journal).
+// Either binary magic: "CLD1" (plain document) or "CLDJ" (journal).
 bool startsWithMagic(const std::string& bytes)
 {
     return bytes.size() >= 4
-           && (bytes.compare(0, 4, "MIB1") == 0 || bytes.compare(0, 4, "MIBJ") == 0);
+           && (bytes.compare(0, 4, "CLD1") == 0 || bytes.compare(0, 4, "CLDJ") == 0);
 }
 
 struct Track
@@ -170,56 +170,6 @@ auto tJsonReadsBinary = test("Format/json document reads a binary file") = []
     check(doc.mutate([](Profile& p) { p.level = 8; }));
     check(!startsWithMagic(readRaw(path)));
     check(doc.get().level == 8);
-};
-
-auto tDatabaseFormatSwitch =
-    test("Format/database adopts stores across format switches") = []
-{
-    const auto dir = TempDir {};
-
-    // Day 1: a JSON database.
-    {
-        auto db = Database {dir.root.string()};
-        auto users = db.collection<Profile>("users");
-        check(users.doc("alice").set({"Alice", 1}));
-        check(users.doc("bob").set({"Bob", 5}));
-    }
-    check(fs::exists(dir.root / "users.json"));
-
-    // Day 2: same directory opened as a binary database. The store file is
-    // adopted under the new extension and stays fully readable.
-    {
-        auto db = Database {dir.root.string(), Format::Binary};
-        auto users = db.collection<Profile>("users");
-
-        check(users.size() == 2);
-        check(users.doc("alice").get()->name == "Alice");
-        check(!fs::exists(dir.root / "users.json"));
-        check(fs::exists(dir.root / "users.ember"));
-
-        // Content is still the old JSON until something writes...
-        check(!startsWithMagic(readRaw(dir.file("users.ember"))));
-
-        // ...and converts on the first write.
-        check(users.doc("carol").set({"Carol", 9}));
-        check(startsWithMagic(readRaw(dir.file("users.ember"))));
-    }
-
-    // Day 3: back to JSON — adopted back, binary content sniffed, converted
-    // on write.
-    {
-        auto db = Database {dir.root.string()};
-        auto users = db.collection<Profile>("users");
-
-        check(users.size() == 3);
-        check(users.doc("carol").get()->level == 9);
-        check(fs::exists(dir.root / "users.json"));
-        check(!fs::exists(dir.root / "users.ember"));
-
-        check(users.doc("carol").remove());
-        check(!startsWithMagic(readRaw(dir.file("users.json"))));
-        check(users.size() == 2);
-    }
 };
 
 auto tBinaryQueries = test("Format/queries work unchanged on a binary store") = []
@@ -424,4 +374,198 @@ auto tBinarySizeAndSpeed =
               << " ms, load " << binaryReadMs << " ms\n";
 
     check(binarySize < jsonSize);
+};
+
+// Two handles on one journal in one process: B appends (and on POSIX keeps
+// its append handle open), then A writes past the compaction limit, which
+// renames over the file. On Windows any open append handle made that rename
+// fail, so this is the scenario AppendFile::persistent exists for.
+auto tCompactionWithTwoHandles =
+    test("Journal/compaction succeeds while another handle has appended") = []
+{
+    const auto dir = TempDir {};
+    auto a =
+        Database {dir.root.string(), Format::Binary}.collection<Profile>("users");
+    auto b =
+        Database {dir.root.string(), Format::Binary}.collection<Profile>("users");
+
+    check(a.doc("seed").set({"Seed", 0})); // first write: a fresh journal base
+    check(b.doc("fromB").set({"B", 1})); // an append through B's handle
+
+    const auto padding = std::string(200, 'x');
+    auto compacted = false;
+    for (auto i = 0; i < 100; ++i)
+    {
+        const auto before = fs::file_size(dir.file("users.ember"));
+        check(a.doc("a" + std::to_string(i)).set({padding, i}));
+        compacted = compacted || fs::file_size(dir.file("users.ember")) < before;
+    }
+    check(compacted);
+
+    // B picks up A's compacted file and can keep appending to it.
+    check(b.doc("fromB2").set({"B", 2}));
+    auto reopened =
+        Database {dir.root.string(), Format::Binary}.collection<Profile>("users");
+    check(reopened.size() == 103);
+    check(reopened.doc("fromB").get()->level == 1);
+    check(reopened.doc("a99").get()->level == 99);
+};
+
+// Schema evolution through the store: a collection written as ProfileV1
+// is opened as ProfileV2, which adds a field. Entries written by V1 stay in
+// the journal base without it; V2 writes land beside them, and a later V2
+// reader sees both.
+namespace
+{
+struct ProfileV1
+{
+    std::uint32_t id = 0;
+    std::string displayName;
+
+    MIRO_REFLECT(id, displayName)
+};
+
+struct ProfileV2
+{
+    std::uint32_t id = 0;
+    std::string displayName;
+    int karma = 10;
+
+    MIRO_REFLECT(id, displayName, karma)
+};
+} // namespace
+
+auto tSchemaEvolution =
+    test("Format/binary collection written as V1 migrates when read as V2") = []
+{
+    const auto dir = TempDir {};
+
+    {
+        auto v1 = Database {dir.root.string(), Format::Binary}.collection<ProfileV1>(
+            "profiles");
+
+        for (auto i = 0u; i < 20; ++i)
+            check(v1.set("p" + std::to_string(i), {i, "user" + std::to_string(i)}));
+
+        check(v1.remove("p3"));
+    }
+
+    {
+        auto v2 = Database {dir.root.string(), Format::Binary}.collection<ProfileV2>(
+            "profiles");
+
+        check(v2.ids().size() == 19);
+        const auto p7 = v2.get("p7");
+        check(p7.has_value());
+        check(p7 && p7->id == 7);
+        check(p7 && p7->displayName == "user7");
+        check(p7 && p7->karma == 10);
+
+        auto bumped = *p7;
+        bumped.karma = 99;
+        check(v2.set("p7", bumped));
+        check(v2.set("new", {100, "fresh", 5}));
+    }
+
+    auto v2 = Database {dir.root.string(), Format::Binary}.collection<ProfileV2>(
+        "profiles");
+    check(v2.ids().size() == 20);
+    check(!v2.contains("p3"));
+
+    const auto p0 = v2.get("p0");
+    check(p0 && p0->displayName == "user0" && p0->karma == 10);
+
+    const auto p7 = v2.get("p7");
+    check(p7 && p7->displayName == "user7" && p7->karma == 99);
+
+    const auto fresh = v2.get("new");
+    check(fresh && fresh->id == 100 && fresh->displayName == "fresh"
+          && fresh->karma == 5);
+
+    for (auto i = 0u; i < 20; ++i)
+    {
+        if (i == 3)
+            continue;
+
+        const auto entry = v2.get("p" + std::to_string(i));
+        check(entry && entry->id == i
+              && entry->displayName == "user" + std::to_string(i));
+    }
+};
+
+namespace
+{
+Calder::Detail::JournalInfo inspectJournalFile(const std::string& path)
+{
+    return Calder::Detail::inspectJournal(detail::asBytes(readRaw(path)));
+}
+
+std::size_t countJournalKeys(const std::string& path)
+{
+    return Calder::Detail::readJournalKeyTable(detail::asBytes(readRaw(path))).getKeyCount();
+}
+} // namespace
+
+auto tJournalNewFieldName =
+    test("Journal/a write with a new field name compacts once, then appends") = []
+{
+    const auto dir = TempDir {};
+    const auto path = dir.file("profiles.ember");
+    constexpr auto entryCount = 5U;
+    constexpr auto profileV1KeyCount = std::size_t {2};
+    constexpr auto profileV2KeyCount = std::size_t {3};
+
+    {
+        auto v1 = Collection<ProfileV1> {path, Format::Binary, Durability::Atomic};
+
+        for (auto i = 0U; i < entryCount; ++i)
+            check(v1.set("v1-" + std::to_string(i), {i, "Old"}));
+    }
+
+    check(countJournalKeys(path) == profileV1KeyCount);
+
+    auto v2 = Collection<ProfileV2> {path, Format::Binary, Durability::Atomic};
+    check(v2.set("v2-0", {0, "New", 0}));
+
+    const auto compacted = inspectJournalFile(path);
+    check(compacted.frameBytes == 0);
+    check(countJournalKeys(path) == profileV2KeyCount);
+
+    for (auto i = 1U; i < entryCount; ++i)
+        check(v2.set("v2-" + std::to_string(i), {i, "New", static_cast<int>(i)}));
+
+    const auto appended = inspectJournalFile(path);
+    check(appended.baseSize == compacted.baseSize);
+    check(appended.frameBytes > 0);
+
+    auto reopened = Collection<ProfileV2> {path, Format::Binary, Durability::Atomic};
+    check(reopened.size() == 2 * entryCount);
+    check(reopened.get("v2-3")->karma == 3);
+    check(reopened.get("v1-2")->displayName == "Old");
+    check(reopened.get("v1-2")->karma == 10);
+};
+
+// The two ways of stamping a file must agree on its identity, and a
+// same-size replace must change it even inside one mtime tick.
+auto tStampIdentity = test("Journal/path and handle stamps agree on identity") = []
+{
+    const auto dir = TempDir {};
+    const auto path = dir.file("stamped.bin");
+    check(writeFileAtomically(path, "aaaa", Durability::Atomic));
+
+    auto file = AppendFile {};
+    check(file.open(path));
+    check(file.append("bb", Durability::Atomic));
+    const auto fromHandle = file.stamp();
+    file.close();
+
+    const auto fromPath = detail::stampFile(path);
+    check(fromHandle.exists);
+    check(fromHandle == fromPath);
+
+    check(writeFileAtomically(path, "cccccc", Durability::Atomic));
+    const auto replaced = detail::stampFile(path);
+    check(replaced.size == fromPath.size);
+    check(replaced.fileId != fromPath.fileId || replaced.device != fromPath.device);
+    check(!(replaced == fromPath));
 };

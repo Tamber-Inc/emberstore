@@ -27,18 +27,31 @@ endif ()
 
 include(cmake/CPM.cmake)
 
+# Pinned to the jamierpond fork's jp/calder-emberstore branch (Miro's develop
+# plus the open PRs Calder needs), the same Miro Calder pins, until those PRs
+# land on eyalamirmusic/Miro develop. Added before
+# eacp, which pulls Miro main itself — CPM keeps whichever version is added
+# first.
+if (NOT TARGET Miro)
+    CPMAddPackage(
+            NAME Miro
+            GITHUB_REPOSITORY jamierpond/Miro
+            GIT_TAG 6aa7ecc44ab708ca0ae23b1aac9a79787e8cd544)
+endif ()
+
+# The binary format (Calder::toBinary, journals) lives in jamierpond/Calder.
+if (NOT TARGET calder)
+    CPMAddPackage(
+            NAME Calder
+            GITHUB_REPOSITORY jamierpond/Calder
+            GIT_TAG 497f48dd1ae3f7fd1fe64f6cd7982c1af53a1874)
+endif ()
+
 if (NOT TARGET eacp-core)
     CPMAddPackage(
             NAME eacp
             GITHUB_REPOSITORY eyalamirmusic/eacp
-            GIT_TAG main)
-endif ()
-
-if (NOT TARGET Miro)
-    CPMAddPackage(
-            NAME Miro
-            GITHUB_REPOSITORY eyalamirmusic/Miro
-            GIT_TAG main)
+            GIT_TAG 257563bee87e69bae41ecf29934c37f3eaec7e49)
 endif ()
 
 add_library(emberstore STATIC
@@ -69,7 +82,7 @@ target_compile_features(emberstore PUBLIC cxx_std_20)
 target_compile_options(emberstore PRIVATE ${EMBERSTORE_WARNINGS})
 # eacp-network carries the interprocess lock (eacp::IPC::Lock) that Document.h
 # now leans on; PUBLIC because that lock leaks through our public headers.
-target_link_libraries(emberstore PUBLIC eacp-core eacp-network Miro)
+target_link_libraries(emberstore PUBLIC eacp-core eacp-network Miro calder)
 
 if (PROJECT_IS_TOP_LEVEL)
     enable_testing()

@@ -10,6 +10,9 @@ CPMAddPackage(
 if (sqlite3_ADDED AND NOT TARGET sqlite3)
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+    # dlopen + pthreads live outside libc on older glibc.
+    find_package(Threads REQUIRED)
+    target_link_libraries(sqlite3 PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 endif ()
 
 add_executable(sqlitestore Main.cpp)

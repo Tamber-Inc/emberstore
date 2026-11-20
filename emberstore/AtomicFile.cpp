@@ -22,13 +22,15 @@
 
 namespace emberstore
 {
-#if !defined(_WIN32)
 namespace detail
 {
 // Defined with stampFile below; AppendFile::stamp shares it.
+#if defined(_WIN32)
+FileStamp stampFromInfo(const BY_HANDLE_FILE_INFORMATION& info);
+#else
 FileStamp stampFromStat(const struct ::stat& info);
-} // namespace detail
 #endif
+} // namespace detail
 
 namespace
 {
@@ -181,9 +183,10 @@ bool AppendFile::open(const eacp::FilePath& path)
     close();
 
     // FILE_APPEND_DATA makes every WriteFile land at the end of the file, the
-    // O_APPEND equivalent. FILE_SHARE_DELETE lets another process replace the
-    // file by rename while we hold this handle — the reader-side validation
-    // makes that safe, and it is how compaction from a sibling process works.
+    // O_APPEND equivalent. FILE_SHARE_DELETE does not make replacing the file
+    // by rename possible while this handle is open — MoveFileEx still fails
+    // with access denied — which is why Document closes it after every append
+    // here (AppendFile::persistent).
     auto native =
         ::CreateFileW(path.wide().c_str(),
                       FILE_APPEND_DATA,
@@ -229,8 +232,13 @@ bool AppendFile::append(std::string_view bytes, Durability durability)
         return false;
     }
 
-    if (durability == Durability::Durable)
-        ::FlushFileBuffers(native);
+    if (durability == Durability::Durable && !::FlushFileBuffers(native))
+    {
+        std::fprintf(stderr,
+                     "emberstore: append flush failed (error %lu)\n",
+                     static_cast<unsigned long>(::GetLastError()));
+        return false;
+    }
 
     return true;
 }
@@ -244,14 +252,7 @@ detail::FileStamp AppendFile::stamp() const
     if (!::GetFileInformationByHandle(reinterpret_cast<HANDLE>(handle), &info))
         return {};
 
-    auto stamp = detail::FileStamp {};
-    stamp.exists = true;
-    stamp.size =
-        (static_cast<std::uintmax_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-    stamp.modifiedTicks =
-        (static_cast<std::int64_t>(info.ftLastWriteTime.dwHighDateTime) << 32)
-        | info.ftLastWriteTime.dwLowDateTime;
-    return stamp;
+    return detail::stampFromInfo(info);
 }
 
 #else
@@ -303,8 +304,11 @@ bool AppendFile::append(std::string_view bytes, Durability durability)
         remaining.remove_prefix(static_cast<std::size_t>(written));
     }
 
-    if (durability == Durability::Durable)
-        ::fsync(fd);
+    if (durability == Durability::Durable && ::fsync(fd) != 0)
+    {
+        std::fprintf(stderr, "emberstore: append fsync failed (errno %d)\n", errno);
+        return false;
+    }
 
     return true;
 }
@@ -323,24 +327,6 @@ detail::FileStamp AppendFile::stamp() const
 
 #endif
 
-void adoptLegacyFile(const eacp::FilePath& legacy, const eacp::FilePath& target)
-{
-    const auto from = eacp::toStdPath(legacy);
-    const auto to = eacp::toStdPath(target);
-
-    auto error = std::error_code {};
-    if (fs::exists(to, error) || !fs::exists(from, error))
-        return;
-
-    fs::rename(from, to, error);
-    if (error)
-        std::fprintf(stderr,
-                     "emberstore: cannot adopt %s as %s: %s\n",
-                     from.string().c_str(),
-                     to.string().c_str(),
-                     error.message().c_str());
-}
-
 namespace detail
 {
 // One stat syscall per stamp — this runs on every cached read, so the
@@ -348,20 +334,42 @@ namespace detail
 // each) costs double for nothing.
 #if defined(_WIN32)
 
-FileStamp stampFile(const eacp::FilePath& path)
+FileStamp stampFromInfo(const BY_HANDLE_FILE_INFORMATION& info)
 {
-    auto data = WIN32_FILE_ATTRIBUTE_DATA {};
-    if (!::GetFileAttributesExW(path.wide().c_str(), GetFileExInfoStandard, &data))
-        return {}; // absent or unreadable
-
     auto stamp = FileStamp {};
     stamp.exists = true;
+    stamp.device = info.dwVolumeSerialNumber;
+    stamp.fileId =
+        (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
     stamp.size =
-        (static_cast<std::uintmax_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+        (static_cast<std::uintmax_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
     stamp.modifiedTicks =
-        (static_cast<std::int64_t>(data.ftLastWriteTime.dwHighDateTime) << 32)
-        | data.ftLastWriteTime.dwLowDateTime;
+        (static_cast<std::int64_t>(info.ftLastWriteTime.dwHighDateTime) << 32)
+        | info.ftLastWriteTime.dwLowDateTime;
     return stamp;
+}
+
+// A handle rather than GetFileAttributesExW, because only a handle yields
+// the file index — the identity AppendFile::stamp reports too. Attribute-only
+// access with every share flag, so it never blocks another process's write.
+FileStamp stampFile(const eacp::FilePath& path)
+{
+    auto native =
+        ::CreateFileW(path.wide().c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_FLAG_BACKUP_SEMANTICS,
+                      nullptr);
+    if (native == INVALID_HANDLE_VALUE)
+        return {}; // absent or unreadable
+
+    auto info = BY_HANDLE_FILE_INFORMATION {};
+    const auto ok = ::GetFileInformationByHandle(native, &info);
+    ::CloseHandle(native);
+
+    return ok ? stampFromInfo(info) : FileStamp {};
 }
 
 #else
@@ -376,6 +384,8 @@ FileStamp stampFromStat(const struct ::stat& info)
 
     auto stamp = FileStamp {};
     stamp.exists = true;
+    stamp.device = static_cast<std::uint64_t>(info.st_dev);
+    stamp.fileId = static_cast<std::uint64_t>(info.st_ino);
     stamp.size = static_cast<std::uintmax_t>(info.st_size);
     stamp.modifiedTicks = static_cast<std::int64_t>(modified.tv_sec) * 1'000'000'000
                           + static_cast<std::int64_t>(modified.tv_nsec);

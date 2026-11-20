@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -194,6 +195,25 @@ std::vector<std::string> pathSegments(const std::string& path)
     return out;
 }
 
+// Collection names and ids must be [A-Za-z0-9_-] — mirrors the firestore
+// app, where collection names become file names.
+bool isSafeName(const std::string& name)
+{
+    return !name.empty()
+           && std::all_of(name.begin(),
+                          name.end(),
+                          [](unsigned char c)
+                          { return std::isalnum(c) || c == '_' || c == '-'; });
+}
+
+// Finalizes `statement` (if any) and throws with SQLite's error message.
+[[noreturn]] void benchFailed(sqlite3* db, sqlite3_stmt* statement)
+{
+    const auto message = std::string {"sqlite: "} + sqlite3_errmsg(db);
+    sqlite3_finalize(statement);
+    throw std::runtime_error(message);
+}
+
 Note benchNote(int index)
 {
     auto note = Note {};
@@ -223,12 +243,14 @@ std::string runBench(const std::string& dataDir, int count, Durability durabilit
     {
         auto db = Sqlite {sqlitePath, durability};
         auto statement = static_cast<sqlite3_stmt*>(nullptr);
-        sqlite3_prepare_v2(db.handle(),
-                           "INSERT OR REPLACE INTO docs(col, id, body) "
-                           "VALUES('bench', ?1, ?2)",
-                           -1,
-                           &statement,
-                           nullptr);
+        if (sqlite3_prepare_v2(db.handle(),
+                               "INSERT OR REPLACE INTO docs(col, id, body) "
+                               "VALUES('bench', ?1, ?2)",
+                               -1,
+                               &statement,
+                               nullptr)
+            != SQLITE_OK)
+            benchFailed(db.handle(), statement);
 
         const auto start = Clock::now();
 
@@ -238,7 +260,8 @@ std::string runBench(const std::string& dataDir, int count, Durability durabilit
             const auto body = Miro::toJSONString(benchNote(i));
             sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(statement, 2, body.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(statement);
+            if (sqlite3_step(statement) != SQLITE_DONE)
+                benchFailed(db.handle(), statement);
             sqlite3_reset(statement);
         }
 
@@ -289,11 +312,13 @@ std::string runBench(const std::string& dataDir, int count, Durability durabilit
     {
         auto db = Sqlite {sqlitePath, durability};
         auto statement = static_cast<sqlite3_stmt*>(nullptr);
-        sqlite3_prepare_v2(db.handle(),
-                           "SELECT body FROM docs WHERE col='bench' AND id=?1",
-                           -1,
-                           &statement,
-                           nullptr);
+        if (sqlite3_prepare_v2(db.handle(),
+                               "SELECT body FROM docs WHERE col='bench' AND id=?1",
+                               -1,
+                               &statement,
+                               nullptr)
+            != SQLITE_OK)
+            benchFailed(db.handle(), statement);
 
         const auto start = Clock::now();
 
@@ -302,13 +327,16 @@ std::string runBench(const std::string& dataDir, int count, Durability durabilit
             const auto id = idAt(i);
             sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
 
-            if (sqlite3_step(statement) == SQLITE_ROW)
+            const auto result = sqlite3_step(statement);
+            if (result == SQLITE_ROW)
             {
                 const auto* text = sqlite3_column_text(statement, 0);
                 const auto note = Miro::createFromJSONString<Note>(
                     reinterpret_cast<const char*>(text));
                 readSum += note.rating;
             }
+            else if (result != SQLITE_DONE)
+                benchFailed(db.handle(), statement);
 
             sqlite3_reset(statement);
         }
@@ -449,6 +477,10 @@ eacp::HTTP::Response handle(Sqlite& db,
 
         return plain(200, runBench(dataDir, count, durability));
     }
+
+    if (segments[0] == "d"
+        && !std::all_of(segments.begin() + 1, segments.end(), isSafeName))
+        return plain(400, "names and ids must be [A-Za-z0-9_-]\n");
 
     if (segments[0] == "d" && segments.size() == 2 && req.type == "GET")
     {

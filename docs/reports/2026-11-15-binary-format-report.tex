@@ -1,0 +1,260 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{fontspec}
+\setmainfont{TeX Gyre Pagella}
+\setmonofont{DejaVu Sans Mono}[Scale=0.85]
+\setlist{itemsep=2pt,topsep=4pt}
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\todo}[1]{\textcolor{orange!70!black}{\textbf{#1}}}
+
+\title{Miro and emberstore's binary format:\\ what was done, what was measured, what needs you}
+\author{Report for Jamie}
+\date{15 November 2026}
+
+\begin{document}
+\maketitle
+
+\section*{In one page}
+
+\textbf{The problem.} emberstore's binary format is meant to become the high-performance format for apps and games that use Miro, for example saving editor state for production games. Today it loads 1~GB of realistic game state in 9.3~s, about 109~MB/s, on one core. A world bigger than 4~GiB is written without error and then reads back empty.
+
+\textbf{What changed.}
+\begin{itemize}
+  \item \textbf{Miro's open PRs now tell one clear story for Eyal.} \code{visitPacked} has its own short PR (\#26). The two loading fixes are separate PRs (\#27, \#28). Four PRs that were stale or tied to TOML are closed.
+  \item \textbf{In your emberstore tree now (uncommitted), decided under your priorities:} reflectors 1.4--2.4$\times$ faster with byte-identical output (0007); one journal format whose writes reference the base's key table, 21\% smaller per write (0006); and the writer refusing a document over 4~GiB instead of writing one that reads back empty (0012). All 161 tests pass.
+  \item \textbf{Miro PR \#29} computes each type's name once, at compile time: about 80~ns saved per object (0011).
+  \item \textbf{The format is written down as a protocol.} A spec, and a 253-line Python decoder written from the spec alone, decode files without any C++.
+  \item \textbf{Every experiment and decision is tracked} in \code{emberstore/docs/decisions/}. Only you mark one accepted.
+\end{itemize}
+
+\textbf{Loading 1~GB of game state, single-threaded, on this machine:} 9.3~s before today; 7.6~s with what's in your tree now; 5.8~s with packed struct arrays (0009, measured, not yet in your tree). Saving: 9.9~s, 6.6~s, 4.9~s. 10~GB (in 1~GB documents) loads in 87~s, 74~s, 58~s. Parallel decode (0010) loaded 1~GB in 1.6~s on 16 threads but is parked: you asked for single-threaded first.
+
+\textbf{What needs you} is listed in section~\ref{sec:needs-you}.
+
+\section{How the work is organised}
+
+The goal is a binary format for apps and games that is simple to build, easy to use, very fast, and quick to load. Two rules follow from that:
+\begin{itemize}
+  \item \textbf{Make things faster without changing how callers write code.} A user's \code{MIRO\_REFLECT} struct and their \code{toBinary} / \code{createFromBinary} calls stay the same; the speed comes from inside.
+  \item \textbf{The format is a protocol, not a C++ memory dump.} Anyone with the spec can read a file in another language; the Python decoder proves it.
+\end{itemize}
+
+Work lives in three places:
+
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+Place & What goes there & Reviewed by \\
+\midrule
+Miro pull requests & general reflection changes any format can use & Eyal \\
+emberstore tree & the binary format, the store, the spec, the decision log & you \\
+experiment copies & throwaway trials, each with its benchmark script & measured, then kept or dropped \\
+\bottomrule
+\end{tabularx}
+
+Each idea moves through the same steps: \textbf{proposed} (the idea), \textbf{measured} (tried in a copy, numbers recorded), \textbf{decided} by you or under your delegated priorities, then \textbf{landed} in the tree or a Miro PR. The decision log records each step, one file per idea.
+
+\section{Miro pull requests}
+
+All PRs are drafts or open on \code{eyalamirmusic/Miro}, from the fork \code{jamierpond/Miro}. Each body is in your format: value, one code block, how it works, what isn't covered, testing.
+
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+PR & What a user gets & State \\
+\midrule
+\#6 & An empty raw JSON object saves as \code{\{\}}, not \code{null}, in files that include only \code{Miro/Bridge.h}. & refreshed onto develop, CI 8/8 \\
+\#27 & A list or map field added in a later version keeps its default when loading an older file, instead of being emptied. & new, CI 8/8 \\
+\#28 & A number that no longer fits its field (int64 into int32, 1e300 into int, $-1$ into unsigned) is refused instead of wrapping. & new, CI 8/8 \\
+\#20 & \code{tryCreateFromJSONString} and \code{createFromJSONStringOrThrow} report malformed JSON; both take \code{Json::ParseOptions}. & reworked to match \#24, CI 8/8 \\
+\#26 & \code{visitPacked}: a reflector takes a whole array of fixed-width numbers in one call. & draft, CI 8/8 \\
+\#29 & Each type's name is computed once, at compile time: about 80~ns less per object, 16--20\% on small structs through JSON. & draft, CI 8/8 \\
+\#19 & Doc comments on every header plus a docs-publishing workflow. & held, as you asked \\
+\bottomrule
+\end{tabularx}
+
+\textbf{\#29 doesn't slow builds.} Clean builds of Miro and its tests, alternating develop and the PR on macprorack: 276~s and 276~s of CPU for develop, 271~s and 269~s for the PR, within noise. No call site changes: \code{typeNameOf<T>()} and \code{qualifiedNameOf<T>()} keep their signatures.
+
+\textbf{Suggested review order:} \#6, \#27, \#28, \#29, \#20, \#26, then \#19. \#26 and \#27 touch the same loader lines, so whichever lands second needs a small merge.
+
+\textbf{Closed:} \#23, replaced by \#26, \#27 and \#28; \#18 (TOML), with its branch kept; \#21, which existed only for TOML; and \#3, which develop already fixes in 3a59076.
+
+\section{Decisions}
+
+Kept in \code{\textasciitilde/projects/emberstore/docs/decisions/}, one file per decision. A decision is Accepted, Rejected or Deferred only on your word, which the file quotes with the date. You delegated 0006, 0007, 0011 and 0012 with ``make good choices that prio: simple to build, ergonomic to use, extremely high perf and quick to load''; those files quote that.
+
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+\# & Decision & Status \\
+\midrule
+0001 & Renamed fields are migrated in the struct's own \code{reflect()}; no \code{legacy()} in Miro. & Accepted \\
+0002 & \code{visitPacked} for every fixed-width number type. & Accepted, PR \#26 \\
+0003 & Raw byte copies of trivially copyable structs. & Superseded by 0009 \\
+0004 & Missing lists and maps keep their defaults; numbers that don't fit are refused. & Accepted, PRs \#27, \#28 \\
+0005 & Store field names as 32- or 64-bit hashes. & Rejected \\
+0006 & One key table shared by a whole journal, as the only journal format. & Accepted, landed \\
+0007 & Cut emberstore's cost per field. & Accepted, landed \\
+0008 & The format is a protocol, readable without the C++ code. & Accepted, spec and decoder done \\
+0009 & Pack arrays of simple reflected structs. & Experiment running \\
+0010 & Decode large arrays in parallel. & Experiment running \\
+0011 & Miro: compute each type's name once, at compile time. & Accepted, PR \#29 \\
+0012 & A document over 4~GiB: the writer now refuses it. & Accepted, landed \\
+\bottomrule
+\end{tabularx}
+
+\section{Measurements}
+
+All measurements were taken on macprorack (2019 Mac Pro, Ubuntu x64, 16 cores, 45~GB) with Release builds and clang 21 at \code{-O3}, and are medians. Every script is in the experiment copies listed in section~\ref{sec:where}.
+
+\subsection{Against protocol buffers}
+
+For each shape the table shows encode and decode time per document. ``pb+copy'' is protobuf v32.1, built with the same flags, including the copy from a plain C++ struct into its generated message and back.
+
+\begin{tabularx}{\textwidth}{@{}X r r r r@{}}
+\toprule
+Shape & emberstore bytes & protobuf bytes & emberstore after 0007 & pb+copy \\
+\midrule
+Note (title, body, rating, tags) & 138 & 88 & 555 / 563 ns & 216 / 256 ns \\
+6 small fields & 52 & 22 & 548 / 499 ns & 48 / 49 ns \\
+10 long-named fields & 385 & 48 & 790 / 702 ns & 115 / 130 ns \\
+track with 20 nested clips & 724 & 628 & 6.2 / 7.7 µs & 1.6 / 2.0 µs \\
+1M floats & 4.0 MB & 4.0 MB & 594 / 432 µs & 742 / 591 µs \\
+\bottomrule
+\end{tabularx}
+
+Before 0007, the small shapes were 5--25$\times$ slower than protobuf. The profile put the time in reflection plumbing: an allocation per field and a string hash per key. 0007 removed both without changing a byte of output, using one reused child reader per nesting depth and a key table that predicts the next key. 158 of 158 tests pass, and 157 of 157 under AddressSanitizer.
+
+About half of the remaining gap is in Miro. It works out each type's name at runtime for every object, at about 100~ns each (decision 0011), and copies a \code{std::string} into every child's options.
+
+Files are bigger than protobuf's for three reasons: names travel in the file, each field costs 2 bytes (an id and a type tag) where protobuf spends 1, and containers carry 4-byte sizes.
+
+\subsection{Field names: hashing versus a shared table}
+
+Today each document stores every field name once, in its key table. A journal write is its own document, so it repeats all the names.
+
+\begin{tabularx}{\textwidth}{@{}X r r r r@{}}
+\toprule
+One journal write & names (today) & hash32 & hash64 & shared table \\
+\midrule
+Note & 157 B & $-10\%$ & 0 & $-20\%$ \\
+6 short fields & 71 B & 0 & $+34\%$ & $-31\%$ \\
+10 long-named fields & 404 B & $-73\%$ & $-63\%$ & $-81\%$ \\
+track with 20 clips & 743 B & $+33\%$ & $+88\%$ & $-9\%$ \\
+\bottomrule
+\end{tabularx}
+
+\textbf{Hashing was rejected (0005).} It makes nested data bigger, because every element repeats its hashes, and the file stops describing itself.
+
+\textbf{The shared table (0006) is smaller in every case.} A write never adds a name: when a struct gains a field, the journal compacts once into a fresh base that includes it. So a corrupt write in the middle loses only itself, as today.
+
+\subsection{Game state at scale}
+
+The test data is a deterministic world of entities. Each entity has a transform, tags, an optional mesh renderer and rigid body, components with property maps, and a property map of its own. Alongside the entities are meshes, materials, and animation clips with keyframes. 73\% of the bytes are small structs and 27\% are packed mesh arrays. 1~GB is about 1.07M entities.
+
+These are baseline numbers, from your tree before 0007.
+
+\begin{tabularx}{\textwidth}{@{}X r r r r@{}}
+\toprule
+Size & Serialize & Deserialize & Peak memory & Correct? \\
+\midrule
+100 MB & 0.97 s & 0.90 s & 0.7 GB & yes \\
+1 GB & 9.9 s & 9.3 s & 6.6 GB & yes \\
+2 GB & 18.9 s & 17.5 s & 13.0 GB & yes \\
+5 GB, one document & 48 s & \textbf{reads back empty} & 20.6 GB & \textbf{no} \\
+5 GB, 1 GB chunks & 47 s & 43 s & 4.5 GB & yes \\
+10 GB, 1 GB chunks & 95 s & 87 s & 4.5 GB & yes \\
+\bottomrule
+\end{tabularx}
+
+\begin{itemize}
+  \item \textbf{Throughput is flat:} about 116~MB/s to deserialize at every size.
+  \item \textbf{JSON is far slower:} the same 100~MB of state is 311~MB as JSON and deserializes at 48~MB/s, so binary loads about 7$\times$ faster.
+  \item \textbf{Where the 1~GB deserialize goes:} about 31\% is memory allocation (a child reader per field), which 0007 removes. About 15\% is finding fields. About 7\% is reflecting each float of \code{Vec3}, \code{Quaternion} and \code{Color}, which 0009 targets. About 2\% is runtime type names (0011).
+\end{itemize}
+
+\subsection{Single-threaded: packed struct arrays (0009)}
+
+Arrays of structs made only of numbers (\code{vector<Keyframe>}, \code{vector<Submesh>}) are now written as one block: the field layout once, then the raw values. \code{MIRO\_REFLECT} detects such structs at compile time, so no call site changes. Measured single-threaded with other builds paused, medians over alternating runs; (b) and (c) encode the same world.
+
+\begin{tabularx}{\textwidth}{@{}X l r r r@{}}
+\toprule
+Size & Build & On disk & Serialize & Deserialize \\
+\midrule
+1 GB & before today & 1013 MB & 9.88 s & 9.29 s \\
+ & 0007 (in your tree) & 1013 MB & 6.59 s & 7.64 s \\
+ & 0007 + packing & 931 MB & 4.93 s & 5.79 s \\
+2 GB & before today & 2035 MB & 18.9 s & 17.5 s \\
+ & 0007 & 2035 MB & 13.2 s & 14.5 s \\
+ & 0007 + packing & 1871 MB & 9.87 s & 11.8 s \\
+10 GB, 1 GB chunks & before today & 10202 MB & 94.8 s & 87.3 s \\
+ & 0007 & 10202 MB & 67.5 s & 73.9 s \\
+ & 0007 + packing & 9383 MB & 49.4 s & 57.9 s \\
+\bottomrule
+\end{tabularx}
+
+Every decoded world equals the original. In this world only keyframes and submeshes pack; the lone \code{Vec3} and \code{Quaternion} inside every \code{Transform} still go field by field. Packing lone number-only structs is the next single-threaded win, followed by 0011's compile-time type names (about 4\% of the remaining decode).
+
+\subsection{Parallel decode (0010), parked}
+
+A Miro hook lets a reflector load a big array's elements on threads it chooses. 1~GB decoded in 1.6~s on 16 threads against 9.4~s on one; one thread costs 0.5--2\% more than before. Scaling past 8 threads is limited by the memory allocator. Parked because you asked for single-threaded first; the code and numbers are in decision 0010.
+
+\section{The format as a protocol (0008)}
+
+The test is: how annoying would it be to write a Go decoder? Three pieces now exist, none of them committed:
+\begin{itemize}
+  \item \textbf{The spec} (now \url{https://github.com/jamierpond/Calder}, \code{SPEC.md}): every tag's byte layout, the key table, the journal and its checksum, how a file maps to a JSON-shaped tree, limits, 14 checks a decoder must apply to untrusted input, and six worked examples of real encoder bytes.
+  \item \textbf{A Python decoder} (\code{python/mib} in the same repo), written by an agent that read only the spec: 253 lines of standard-library Python, with 45 passing tests. Every worked example decoded byte for byte on the first try. It found 10 small gaps in the spec, such as the missing maximum depth and an undefined ``valid UTF-8''.
+  \item \textbf{Not yet built: the comparison test.} It would decode every test file with both decoders and compare the results.
+\end{itemize}
+
+\textbf{Where C++ leaks into the format:}
+\begin{itemize}
+  \item A \code{uint64\_t} above $2^{63}$ reads back negative.
+  \item A variant is stored under its C++ type name, which depends on the compiler (GCC writes \code{basic\_string<char>}).
+  \item An enum is a string in one record and a number in another.
+  \item Float versus double is chosen per value.
+  \item Integer width and signedness are not stored.
+\end{itemize}
+The spec proposes a fix for each. None is made.
+
+\section{What needs you}\label{sec:needs-you}
+\begin{enumerate}
+  \item \textbf{Commit} emberstore's tree when you're happy: 0006, 0007, 0012, the spec, the Python decoder, the decision log and this report are all uncommitted on \code{jp/binary}.
+  \item \textbf{Spec calls to confirm:}
+    \begin{itemize}
+      \item Duplicate keys: the last one wins.
+      \item A journal write that doesn't decode is skipped.
+      \item Invalid UTF-8 is an error.
+      \item NaN and infinity become \code{null}.
+      \item A maximum nesting depth (256 suggested).
+      \item The spec is stricter than the C++ reader. One case now differs: a journal write whose value names a field id the base doesn't have is skipped by the spec and the Python decoder, but applied by C++ (which reads it as a missing field). One of the two should change.
+    \end{itemize}
+  \item \textbf{Format leaks:} fix \code{uint64} and variant naming now, or later?
+  \item \textbf{0009 (packed struct arrays):} accept? Then it's brought into your tree, on top of 0006 and 0012.
+  \item \textbf{The 4~GiB ceiling:} keep ``the writer refuses'' (0012), or add a header flag for 64-bit sizes used only by documents that need it (no cost to smaller files)?
+  \item \textbf{The protocol's own repo and name:} once the spec settles.
+\end{enumerate}
+
+\section{Where everything is}\label{sec:where}
+{\sloppy
+\begin{itemize}
+  \item \textbf{Your emberstore tree} (uncommitted, branch \code{jp/binary}): the decision log, the spec, the Python decoder, this report, and the byte layout viewer (\code{Apps/ByteLayout}, served at \url{http://macprorack.taila4cc5a.ts.net:8742/}).
+  \item \textbf{Experiment copies:}
+    \begin{itemize}
+      \item \code{\textasciitilde/projects/emberstore-key-hashing}: hashing and the shared table, and the explainer at \url{http://macprorack.taila4cc5a.ts.net:8743/}.
+      \item \code{emberstore-protobuf-bench}: the protobuf comparison.
+      \item \code{emberstore-reflector-speed}: 0007.
+      \item \code{emberstore-game-state-bench}: game state at scale.
+      \item \code{emberstore-packed-structs}: 0009.
+      \item \code{emberstore-parallel-decode}: 0010.
+    \end{itemize}
+  \item \textbf{Miro worktrees} in \code{\textasciitilde/projects/}, one per branch: \code{Miro-jp-visit-packed}, \code{Miro-jp-keep-missing-containers}, \code{Miro-jp-range-checked-numbers}, \code{Miro-jp-raw-json-empty-object}, \code{Miro-jp-parse-error-handling}, \code{Miro-jp-packed-structs} and \code{Miro-jp-parallel-load} (the last two are experiments, not pushed).
+\end{itemize}
+}
+
+\end{document}

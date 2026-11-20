@@ -25,13 +25,13 @@ enum class Durability
     Durable,
 };
 
-// The on-disk encoding a store writes. Reads always sniff the file's actual
-// content — a Binary store opens a legacy JSON file and vice versa — so the
-// format only decides what the next write emits, and switching it never
-// strands existing data.
+// The on-disk encoding a store writes. Reads sniff the file's actual content
+// (a Binary Document can read a JSON file and vice versa), but the format is
+// fixed per Database: it picks the file extension, so a store opened under
+// the other format is a different file.
 //
 //   Json — pretty-printed text: greppable, diffable, hand-editable.
-//   Binary — Miro's packed wire format ("MIB1"): a fraction of the size,
+//   Binary — Calder's packed format ("CLD1"): a fraction of the size,
 //     several times faster to encode/decode, and floats round-trip bit-exact
 //     instead of via decimal text.
 enum class Format
@@ -39,13 +39,6 @@ enum class Format
     Json,
     Binary,
 };
-
-// If `target` is absent and `legacy` exists, renames legacy → target so a
-// Database opened under a new Format adopts the store file the old format
-// left behind (the content is converted on the next write; reads sniff it
-// either way). Best effort: on failure the legacy file is simply left in
-// place and the target starts empty.
-void adoptLegacyFile(const eacp::FilePath& legacy, const eacp::FilePath& target);
 
 // nullopt when the file is absent or unreadable (an empty file reads as "").
 std::optional<std::string> readTextFile(const eacp::FilePath& path);
@@ -62,14 +55,18 @@ bool writeFileAtomically(const eacp::FilePath& path,
 
 namespace detail
 {
-// A cheap identity for a file's contents — last-write time plus size. Two
+// A cheap identity for a file's contents — which file (device + inode, or
+// volume serial + file index on Windows) plus last-write time and size. Two
 // absent files compare equal. Lets a cached parse be validated with a stat
-// instead of re-reading and re-parsing the file. Only ever compared against
-// other stamps from this process, so the tick unit is whatever the platform
-// stat call reports — it is never persisted.
+// instead of re-reading and re-parsing the file. The file identity is what
+// catches a same-size replace-by-rename within one mtime tick. Only ever
+// compared against other stamps from this process, so the units are whatever
+// the platform reports — it is never persisted.
 struct FileStamp
 {
     bool exists = false;
+    std::uint64_t device = 0;
+    std::uint64_t fileId = 0;
     std::int64_t modifiedTicks = 0;
     std::uintmax_t size = 0;
 
@@ -91,11 +88,21 @@ FileStamp stampFile(const eacp::FilePath& path);
 // appends flush to disk after each write.
 //
 // The handle pins the inode it opened, not the path: close it before
-// renaming over the file (Windows refuses the rename outright) and whenever
-// the file may have been replaced from outside.
+// renaming over the file and whenever the file may have been replaced from
+// outside. On Windows any open append handle — ours or another process's,
+// FILE_SHARE_DELETE or not — makes a replace-by-rename of the file fail, so
+// there the handle must not outlive a single append (see persistent).
 class AppendFile
 {
 public:
+    // Whether a handle may stay open between appends. POSIX only: on Windows
+    // a held handle would block every other process's compaction.
+#if defined(_WIN32)
+    static constexpr bool persistent = false;
+#else
+    static constexpr bool persistent = true;
+#endif
+
     AppendFile() = default;
     ~AppendFile();
 
