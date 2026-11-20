@@ -214,33 +214,44 @@ public:
     const eacp::FilePath& filePath() const { return staged.document.filePath(); }
 
 private:
+    using StagedChanges = std::map<std::string, std::optional<T>>;
+    using StagedChange = typename StagedChanges::value_type;
+    using StagedChangeIterator = typename StagedChanges::const_iterator;
+
     // Walks the stored and staged maps together in id order, so the result is
     // sorted like a plain Collection's without copying the stored map.
     template <typename Visitor>
     void visitEachVisibleDocument(Visitor&& visit)
     {
-        const auto& stored = staged.document.peek();
-        auto storedIt = stored.begin();
-        auto changeIt = staged.changes.begin();
-
-        while (storedIt != stored.end() || changeIt != staged.changes.end())
+        auto change = staged.changes.cbegin();
+        for (const auto& [id, value]: staged.document.peek())
         {
-            const auto isStoredNext =
-                changeIt == staged.changes.end()
-                || (storedIt != stored.end() && storedIt->first < changeIt->first);
-            if (isStoredNext)
-            {
-                visit(storedIt->first, storedIt->second);
-                ++storedIt;
-                continue;
-            }
-
-            if (storedIt != stored.end() && storedIt->first == changeIt->first)
-                ++storedIt;
-            if (changeIt->second)
-                visit(changeIt->first, *changeIt->second);
-            ++changeIt;
+            change = visitStagedChangesBefore(id, change, visit);
+            if (change != staged.changes.cend() && change->first == id)
+                visitStagedChange(*change++, visit);
+            else
+                visit(id, value);
         }
+
+        for (; change != staged.changes.cend(); ++change)
+            visitStagedChange(*change, visit);
+    }
+
+    template <typename Visitor>
+    auto visitStagedChangesBefore(const std::string& id,
+                                  StagedChangeIterator change,
+                                  Visitor& visit) const
+    {
+        for (; change != staged.changes.cend() && change->first < id; ++change)
+            visitStagedChange(*change, visit);
+        return change;
+    }
+
+    template <typename Visitor>
+    static void visitStagedChange(const StagedChange& change, Visitor& visit)
+    {
+        if (change.second)
+            visit(change.first, *change.second);
     }
 
     detail::StagedCollectionFile<T>& staged;

@@ -31,6 +31,17 @@ eacp::Vector<std::string> contestArguments(const std::string& path,
         arguments.add(arg);
     return arguments;
 }
+
+int commitCountThroughTransactionalDatabase(const std::string& root,
+                                            const std::string& key)
+{
+    auto database = TransactionalDatabase {root};
+    database.collection<int>("counts").set(key, 1);
+    if (!database.commit())
+        return 3;
+    std::puts("committed");
+    return 0;
+}
 } // namespace
 
 void rememberSelfExecutable(const char* argv0)
@@ -60,14 +71,7 @@ int runIfContestInvocation(int argc, char** argv)
     }
 
     if (mode == "commit")
-    {
-        auto database = TransactionalDatabase {path};
-        database.collection<int>("counts").set(arg, 1);
-        if (!database.commit())
-            return 3;
-        std::puts("committed");
-        return 0;
-    }
+        return commitCountThroughTransactionalDatabase(path, arg);
 
     // path is the lock *name* the Document locks under (its file path); eacp
     // maps it to a lock file of its own, so contending here is real contention.
