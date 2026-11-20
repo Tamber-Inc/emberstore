@@ -19,8 +19,9 @@ namespace emberstore
 //   users.doc("alice").set({"Alice", 1});
 //
 // A thin handle factory — the returned stores own the IO and, like them, it is
-// message-thread only. Safe for a single app / process for now; an inter-process
-// lock will come later.
+// message-thread only. Every write through them commits at once, like SQLite's
+// autocommit; TransactionalDatabase hands out the same stores with their writes
+// staged until commit().
 class Database
 {
 public:

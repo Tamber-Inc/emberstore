@@ -18,6 +18,8 @@ namespace emberstore::testing
 //   hold <ms>    take the lock, report "locked", hold it that long, then exit
 //   crash        take the lock, report "locked", then die still holding it
 //   write <text> overwrite the file ignoring the lock, as an editor would
+//   commit <key> open a TransactionalDatabase rooted at <path>, stage <key> = 1
+//                in its "counts" collection, commit, report "committed"
 //
 // Needed because a second lock inside one process only proves the lock binds to
 // the descriptor. It says nothing about whether the lock actually crosses a

@@ -3,6 +3,7 @@
 // emberstore — transactional, Miro-backed on-disk storage.
 //
 //   Database      — a directory of typed stores, opened by name.
+//   TransactionalDatabase — a Database whose writes wait for commit().
 //   Document<T>   — one reflected value persisted as a whole JSON file.
 //   Collection<T> — Firestore-style documents keyed by external string id.
 //   Query<T>      — where / orderBy / limit over a collection.
@@ -14,3 +15,4 @@
 #include "Database.h"
 #include "Document.h"
 #include "Query.h"
+#include "TransactionalDatabase.h"
