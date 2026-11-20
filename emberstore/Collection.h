@@ -63,6 +63,10 @@ public:
     std::optional<T> get(const std::string& id)
     {
         eacp::Threads::assertMainThread();
+        const auto change = stagedChanges.find(id);
+        if (change != stagedChanges.end())
+            return change->second;
+
         const auto& all = document.peek();
         const auto it = all.find(id);
         if (it == all.end())
@@ -70,22 +74,36 @@ public:
         return it->second;
     }
 
-    // Stores `value` under `id`, replacing any document already there.
+    // Stores `value` under `id`, replacing any document already there. In a
+    // TransactionalDatabase it is staged instead and this returns true.
     bool set(const std::string& id, const T& value)
     {
         eacp::Threads::assertMainThread();
+        if (writeMode == detail::WriteMode::StageUntilCommit)
+        {
+            stagedChanges.insert_or_assign(id, value);
+            return true;
+        }
         return document.mutate([&](Map& all) { all[id] = value; });
     }
 
     bool remove(const std::string& id)
     {
         eacp::Threads::assertMainThread();
+        if (writeMode == detail::WriteMode::StageUntilCommit)
+        {
+            stagedChanges.insert_or_assign(id, std::nullopt);
+            return true;
+        }
         return document.mutate([&](Map& all) { all.erase(id); });
     }
 
     bool contains(const std::string& id)
     {
         eacp::Threads::assertMainThread();
+        const auto change = stagedChanges.find(id);
+        if (change != stagedChanges.end())
+            return change->second.has_value();
         const auto& all = document.peek();
         return all.find(id) != all.end();
     }
@@ -94,8 +112,8 @@ public:
     {
         eacp::Threads::assertMainThread();
         auto out = std::vector<std::string> {};
-        for (const auto& [id, value]: document.peek())
-            out.push_back(id);
+        visitEachVisibleDocument([&](const std::string& id, const T&)
+                                 { out.push_back(id); });
         return out;
     }
 
@@ -103,8 +121,8 @@ public:
     {
         eacp::Threads::assertMainThread();
         auto out = std::vector<T> {};
-        for (const auto& [id, value]: document.peek())
-            out.push_back(value);
+        visitEachVisibleDocument([&](const std::string&, const T& value)
+                                 { out.push_back(value); });
         return out;
     }
 
@@ -117,25 +135,109 @@ public:
     {
         eacp::Threads::assertMainThread();
         auto matches = std::vector<T> {};
-        for (const auto& [id, value]: document.peek())
-            if (predicate(value))
-                matches.push_back(value);
+        visitEachVisibleDocument(
+            [&](const std::string&, const T& value)
+            {
+                if (predicate(value))
+                    matches.push_back(value);
+            });
         return Query<T> {std::move(matches)};
     }
 
     std::size_t size()
     {
         eacp::Threads::assertMainThread();
-        return document.peek().size();
+        if (stagedChanges.empty())
+            return document.peek().size();
+
+        auto count = std::size_t {0};
+        visitEachVisibleDocument([&](const std::string&, const T&) { ++count; });
+        return count;
     }
 
     bool empty()
     {
         eacp::Threads::assertMainThread();
-        return document.peek().empty();
+        if (stagedChanges.empty())
+            return document.peek().empty();
+        return size() == 0;
     }
 
 private:
+    template <typename Store>
+    friend class detail::TransactionalStore;
+
+    // A key mapped to nullopt is a staged remove.
+    using StagedChanges = std::map<std::string, std::optional<T>>;
+    using StagedChange = typename StagedChanges::value_type;
+    using StagedChangeIterator = typename StagedChanges::const_iterator;
+
+    bool commitStagedChanges()
+    {
+        if (stagedChanges.empty())
+            return true;
+
+        const auto committed = document.mutate(
+            [this](Map& all)
+            {
+                for (const auto& [id, change]: stagedChanges)
+                {
+                    if (change)
+                        all.insert_or_assign(id, *change);
+                    else
+                        all.erase(id);
+                }
+            });
+        if (committed)
+            stagedChanges.clear();
+        return committed;
+    }
+
+    void discardStagedChanges() { stagedChanges.clear(); }
+    bool hasStagedChanges() const { return !stagedChanges.empty(); }
+    void stageWritesUntilCommit()
+    {
+        writeMode = detail::WriteMode::StageUntilCommit;
+    }
+
+    // Walks the stored and staged maps together in id order, so the result is
+    // sorted by id without copying the stored map.
+    template <typename Visitor>
+    void visitEachVisibleDocument(Visitor&& visit)
+    {
+        auto change = stagedChanges.cbegin();
+        for (const auto& [id, value]: document.peek())
+        {
+            change = visitStagedChangesBefore(id, change, visit);
+            if (change != stagedChanges.cend() && change->first == id)
+                visitStagedChange(*change++, visit);
+            else
+                visit(id, value);
+        }
+
+        for (; change != stagedChanges.cend(); ++change)
+            visitStagedChange(*change, visit);
+    }
+
+    template <typename Visitor>
+    StagedChangeIterator visitStagedChangesBefore(const std::string& id,
+                                                  StagedChangeIterator change,
+                                                  Visitor& visit) const
+    {
+        for (; change != stagedChanges.cend() && change->first < id; ++change)
+            visitStagedChange(*change, visit);
+        return change;
+    }
+
+    template <typename Visitor>
+    static void visitStagedChange(const StagedChange& change, Visitor& visit)
+    {
+        if (change.second)
+            visit(change.first, *change.second);
+    }
+
     Document<Map> document;
+    StagedChanges stagedChanges;
+    detail::WriteMode writeMode = detail::WriteMode::CommitEachChange;
 };
 } // namespace emberstore

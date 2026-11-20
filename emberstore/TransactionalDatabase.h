@@ -3,314 +3,65 @@
 #include "Collection.h"
 #include "Database.h"
 #include "Document.h"
-#include "Query.h"
 
 #include <eacp/Core/Threads/ThreadUtils.h>
 
 #include <algorithm>
-#include <cstddef>
-#include <functional>
 #include <map>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace emberstore
 {
 namespace detail
 {
-class StagedFile
+class StagedStore
 {
 public:
-    virtual ~StagedFile() = default;
+    virtual ~StagedStore() = default;
 
     virtual bool hasStagedChanges() const = 0;
     virtual bool commitStagedChanges() = 0;
     virtual void discardStagedChanges() = 0;
 };
 
-template <typename T>
-struct StagedCollectionFile final : StagedFile
+template <typename Store>
+class TransactionalStore final : public StagedStore
 {
-    using Stored = typename Collection<T>::Map;
-
-    explicit StagedCollectionFile(Document<Stored> documentToUse)
-        : document(std::move(documentToUse))
+public:
+    explicit TransactionalStore(Store storeToUse)
+        : store(std::move(storeToUse))
     {
+        store.stageWritesUntilCommit();
     }
 
-    bool hasStagedChanges() const override { return !changes.empty(); }
+    bool hasStagedChanges() const override { return store.hasStagedChanges(); }
+    bool commitStagedChanges() override { return store.commitStagedChanges(); }
+    void discardStagedChanges() override { store.discardStagedChanges(); }
 
-    bool commitStagedChanges() override
-    {
-        const auto committed = document.mutate(
-            [&](Stored& stored)
-            {
-                for (const auto& [id, change]: changes)
-                {
-                    if (change)
-                        stored.insert_or_assign(id, *change);
-                    else
-                        stored.erase(id);
-                }
-            });
-
-        if (committed)
-            changes.clear();
-        return committed;
-    }
-
-    void discardStagedChanges() override { changes.clear(); }
-
-    Document<Stored> document;
-
-    // A key mapped to nullopt is a staged remove.
-    std::map<std::string, std::optional<T>> changes;
-};
-
-template <typename T>
-struct StagedDocumentFile final : StagedFile
-{
-    using Stored = T;
-
-    explicit StagedDocumentFile(Document<Stored> documentToUse)
-        : document(std::move(documentToUse))
-    {
-    }
-
-    bool hasStagedChanges() const override { return stagedValue.has_value(); }
-
-    bool commitStagedChanges() override
-    {
-        const auto committed = document.write(*stagedValue);
-        if (committed)
-            stagedValue.reset();
-        return committed;
-    }
-
-    void discardStagedChanges() override { stagedValue.reset(); }
-
-    Document<Stored> document;
-    std::optional<T> stagedValue;
+    Store store;
 };
 } // namespace detail
 
-// A Collection whose sets and removes are staged in its TransactionalDatabase
-// until commit(). Reads see the staged changes layered over the file. A handle:
-// it must not outlive the database that made it.
-template <typename T>
-class TransactionalCollection
-{
-public:
-    class DocRef
-    {
-    public:
-        DocRef(TransactionalCollection& ownerToUse, std::string idToUse)
-            : owner(ownerToUse)
-            , id(std::move(idToUse))
-        {
-        }
-
-        std::optional<T> get() const { return owner.get(id); }
-        void set(const T& value) { owner.set(id, value); }
-        void remove() { owner.remove(id); }
-        bool exists() const { return owner.contains(id); }
-        const std::string& key() const { return id; }
-
-    private:
-        TransactionalCollection& owner;
-        std::string id;
-    };
-
-    explicit TransactionalCollection(detail::StagedCollectionFile<T>& stagedToUse)
-        : staged(stagedToUse)
-    {
-    }
-
-    DocRef doc(std::string id) { return DocRef {*this, std::move(id)}; }
-
-    std::optional<T> get(const std::string& id)
-    {
-        eacp::Threads::assertMainThread();
-        const auto change = staged.changes.find(id);
-        if (change != staged.changes.end())
-            return change->second;
-
-        const auto& stored = staged.document.peek();
-        const auto it = stored.find(id);
-        if (it == stored.end())
-            return std::nullopt;
-        return it->second;
-    }
-
-    void set(const std::string& id, const T& value)
-    {
-        eacp::Threads::assertMainThread();
-        staged.changes.insert_or_assign(id, value);
-    }
-
-    void remove(const std::string& id)
-    {
-        eacp::Threads::assertMainThread();
-        staged.changes.insert_or_assign(id, std::nullopt);
-    }
-
-    bool contains(const std::string& id)
-    {
-        eacp::Threads::assertMainThread();
-        const auto change = staged.changes.find(id);
-        if (change != staged.changes.end())
-            return change->second.has_value();
-        return staged.document.peek().contains(id);
-    }
-
-    std::vector<std::string> ids()
-    {
-        eacp::Threads::assertMainThread();
-        auto out = std::vector<std::string> {};
-        visitEachVisibleDocument([&](const std::string& id, const T&)
-                                 { out.push_back(id); });
-        return out;
-    }
-
-    std::vector<T> values()
-    {
-        eacp::Threads::assertMainThread();
-        auto out = std::vector<T> {};
-        visitEachVisibleDocument([&](const std::string&, const T& value)
-                                 { out.push_back(value); });
-        return out;
-    }
-
-    Query<T> query() { return Query<T> {values()}; }
-
-    Query<T> where(std::function<bool(const T&)> predicate)
-    {
-        eacp::Threads::assertMainThread();
-        auto matches = std::vector<T> {};
-        visitEachVisibleDocument(
-            [&](const std::string&, const T& value)
-            {
-                if (predicate(value))
-                    matches.push_back(value);
-            });
-        return Query<T> {std::move(matches)};
-    }
-
-    std::size_t size()
-    {
-        eacp::Threads::assertMainThread();
-        auto count = std::size_t {0};
-        visitEachVisibleDocument([&](const std::string&, const T&) { ++count; });
-        return count;
-    }
-
-    bool empty() { return size() == 0; }
-
-    const eacp::FilePath& filePath() const { return staged.document.filePath(); }
-
-private:
-    using StagedChanges = std::map<std::string, std::optional<T>>;
-    using StagedChange = typename StagedChanges::value_type;
-    using StagedChangeIterator = typename StagedChanges::const_iterator;
-
-    // Walks the stored and staged maps together in id order, so the result is
-    // sorted like a plain Collection's without copying the stored map.
-    template <typename Visitor>
-    void visitEachVisibleDocument(Visitor&& visit)
-    {
-        auto change = staged.changes.cbegin();
-        for (const auto& [id, value]: staged.document.peek())
-        {
-            change = visitStagedChangesBefore(id, change, visit);
-            if (change != staged.changes.cend() && change->first == id)
-                visitStagedChange(*change++, visit);
-            else
-                visit(id, value);
-        }
-
-        for (; change != staged.changes.cend(); ++change)
-            visitStagedChange(*change, visit);
-    }
-
-    template <typename Visitor>
-    auto visitStagedChangesBefore(const std::string& id,
-                                  StagedChangeIterator change,
-                                  Visitor& visit) const
-    {
-        for (; change != staged.changes.cend() && change->first < id; ++change)
-            visitStagedChange(*change, visit);
-        return change;
-    }
-
-    template <typename Visitor>
-    static void visitStagedChange(const StagedChange& change, Visitor& visit)
-    {
-        if (change.second)
-            visit(change.first, *change.second);
-    }
-
-    detail::StagedCollectionFile<T>& staged;
-};
-
-// A Document whose set() is staged in its TransactionalDatabase until commit().
-// mutateImmediately() bypasses staging: it takes the inter-process lock, edits
-// the file and writes it at once. A handle: it must not outlive its database.
-template <typename T>
-class TransactionalDocument
-{
-public:
-    explicit TransactionalDocument(detail::StagedDocumentFile<T>& stagedToUse)
-        : staged(stagedToUse)
-    {
-    }
-
-    T read() { return peek(); }
-    T get() { return read(); }
-
-    const T& peek()
-    {
-        eacp::Threads::assertMainThread();
-        if (staged.stagedValue)
-            return *staged.stagedValue;
-        return staged.document.peek();
-    }
-
-    void set(const T& value)
-    {
-        eacp::Threads::assertMainThread();
-        staged.stagedValue = value;
-    }
-
-    template <typename Fn>
-    bool mutateImmediately(Fn&& fn)
-    {
-        eacp::Threads::assertMainThread();
-        return staged.document.mutate(std::forward<Fn>(fn));
-    }
-
-    const eacp::FilePath& filePath() const { return staged.document.filePath(); }
-
-private:
-    detail::StagedDocumentFile<T>& staged;
-};
-
-// A Database whose writes wait in memory until commit(). Each commit takes every
-// changed file's inter-process lock, re-reads it, applies the staged sets and
-// removes, and writes it once, so another process's changes to other keys
-// survive. Changes still staged when it is destroyed are discarded.
+// A Database whose writes wait in memory until commit(). The stores it hands
+// out are the same Document and Collection a Database makes, except that their
+// writes are staged; reads through them see the staged changes over the file.
+// Each commit takes every changed file's inter-process lock, re-reads it,
+// replays the staged changes and writes it once, so another process's changes
+// to other keys survive. Changes still staged when it is destroyed are dropped.
 //
 //   auto db = TransactionalDatabase {configDir};
-//   auto users = db.collection<Profile>("users");
+//   auto& users = db.collection<Profile>("users");
 //   users.doc("alice").set({"Alice", 1});
 //   users.doc("bob").remove();
 //   db.commit();
 //
-// Message-thread only, like Database.
+// The stores are owned by the database: hold them by reference. Message-thread
+// only, like Database.
 class TransactionalDatabase
 {
 public:
@@ -321,19 +72,17 @@ public:
     }
 
     template <typename T>
-    TransactionalDocument<T> document(std::string_view name)
+    Document<T>& document(std::string_view name)
     {
         eacp::Threads::assertMainThread();
-        return TransactionalDocument<T> {
-            findOrCreateStagedFile<detail::StagedDocumentFile<T>>(name)};
+        return findOrCreateStore(name, [&] { return database.document<T>(name); });
     }
 
     template <typename T>
-    TransactionalCollection<T> collection(std::string_view name)
+    Collection<T>& collection(std::string_view name)
     {
         eacp::Threads::assertMainThread();
-        return TransactionalCollection<T> {
-            findOrCreateStagedFile<detail::StagedCollectionFile<T>>(name)};
+        return findOrCreateStore(name, [&] { return database.collection<T>(name); });
     }
 
     // Writes each changed file once. Returns false if any file could not be
@@ -342,10 +91,9 @@ public:
     {
         eacp::Threads::assertMainThread();
         auto isEveryFileCommitted = true;
-        for (auto& entry: stagedFiles)
+        for (auto& entry: stores)
         {
-            auto& staged = *entry.second;
-            if (staged.hasStagedChanges() && !staged.commitStagedChanges())
+            if (!entry.second->commitStagedChanges())
                 isEveryFileCommitted = false;
         }
         return isEveryFileCommitted;
@@ -354,15 +102,15 @@ public:
     void discardChanges()
     {
         eacp::Threads::assertMainThread();
-        for (auto& entry: stagedFiles)
+        for (auto& entry: stores)
             entry.second->discardStagedChanges();
     }
 
     bool hasUncommittedChanges() const
     {
         eacp::Threads::assertMainThread();
-        return std::any_of(stagedFiles.begin(),
-                           stagedFiles.end(),
+        return std::any_of(stores.begin(),
+                           stores.end(),
                            [](const auto& entry)
                            { return entry.second->hasStagedChanges(); });
     }
@@ -370,23 +118,23 @@ public:
     const eacp::FilePath& directory() const { return database.directory(); }
 
 private:
-    template <typename Staged>
-    Staged& findOrCreateStagedFile(std::string_view name)
+    template <typename MakeStore>
+    auto& findOrCreateStore(std::string_view name, MakeStore&& makeStore)
     {
-        auto& slot = stagedFiles[std::string {name}];
-        if (!slot)
-        {
-            slot = std::make_unique<Staged>(
-                database.document<typename Staged::Stored>(name));
-        }
+        using Store = std::invoke_result_t<MakeStore&>;
+        using Entry = detail::TransactionalStore<Store>;
 
-        if (auto* const typed = dynamic_cast<Staged*>(slot.get()))
-            return *typed;
+        auto& slot = stores[std::string {name}];
+        if (!slot)
+            slot = std::make_unique<Entry>(makeStore());
+
+        if (auto* const entry = dynamic_cast<Entry*>(slot.get()))
+            return entry->store;
         throw std::logic_error {"emberstore: \"" + std::string {name}
                                 + "\" is already open as a different type"};
     }
 
     Database database;
-    std::map<std::string, std::unique_ptr<detail::StagedFile>> stagedFiles;
+    std::map<std::string, std::unique_ptr<detail::StagedStore>> stores;
 };
 } // namespace emberstore

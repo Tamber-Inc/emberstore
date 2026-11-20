@@ -17,22 +17,21 @@ users.where([](auto& p){ return p.level > 2; }).orderBy(&Profile::level).get();
 
 ## Batching writes
 
-`Database` writes the file on every `set` and `remove`. `TransactionalDatabase` has the same `collection` and `document` calls, but keeps changes in memory until you call `commit()`, which writes each changed file once under its lock. Reads through it see your staged changes; other processes see nothing until the commit. Changes to different keys from other processes survive your commit, and for the same key the last commit wins. Anything still staged when the database is destroyed is thrown away.
+Every write goes through one commit path: take the file's inter-process lock, re-read the file if the change depends on it, apply the change and write the file once. `Database` commits after every `set`, `remove` and `mutate`, like SQLite's autocommit. `TransactionalDatabase` hands out the same `Document` and `Collection` stores, but keeps their changes in memory until you call `commit()`, which replays them under the lock and writes each changed file once. A staged `mutate` keeps the function itself, so at commit it runs on whatever the file then holds, and other processes' changes to other keys survive. Reads through the stores see your staged changes; other processes see nothing until the commit, and anything still staged when the database is destroyed is thrown away.
 
 ```cpp
 auto db = emberstore::TransactionalDatabase {configDir};
-auto users = db.collection<Profile>("users");
+auto& users = db.collection<Profile>("users");  // owned by db: hold a reference
 users.doc("alice").set({"Alice", 1});
 users.doc("bob").remove();
 
 if (userCancelled)
-    db.discardChanges();               // nothing is written
+    db.discardChanges();                         // nothing is written
 else
-    db.commit();                       // one locked write for users.json
-
-// Writes at once, even with other changes staged: the way to hand out ids.
-db.document<IdCounter>("ids").mutateImmediately([&](IdCounter& c) { id = c.next++; });
+    db.commit();                                 // one locked write for users.json
 ```
+
+To hand out ids across processes, use a plain `Database` on the same folder: its `mutate` takes the lock, re-reads, increments and writes at once, whatever is staged elsewhere.
 
 ## Using it
 
