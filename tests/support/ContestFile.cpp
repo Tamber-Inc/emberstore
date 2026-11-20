@@ -1,5 +1,7 @@
 #include "ContestFile.h"
 
+#include <emberstore/TransactionalDatabase.h>
+
 #include <eacp/Core/Utils/Containers.h>
 #include <eacp/Network/IPC/Lock.h>
 
@@ -54,6 +56,16 @@ int runIfContestInvocation(int argc, char** argv)
         out << arg;
         out.flush();
         std::puts("wrote");
+        return 0;
+    }
+
+    if (mode == "commit")
+    {
+        auto database = TransactionalDatabase {path};
+        database.collection<int>("counts").set(arg, 1);
+        if (!database.commit())
+            return 3;
+        std::puts("committed");
         return 0;
     }
 
