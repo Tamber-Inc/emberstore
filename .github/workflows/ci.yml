@@ -27,13 +27,29 @@ jobs:
       # per platform.
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
       CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
     steps:
       - uses: actions/checkout@v4
+
+      # eacp configures its window, GPU and text modules by default, and on
+      # Linux those look up these system libraries. Ninja because `-j` with no
+      # number makes Make start every compile at once.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libcurl4-openssl-dev \
+            libwayland-dev wayland-protocols libwayland-bin libxkbcommon-dev \
+            libdecor-0-dev pkg-config \
+            libxcb1-dev libxcb-xkb-dev libxkbcommon-x11-dev \
+            libxcb-randr0-dev libxcb-xfixes0-dev libxcb-cursor-dev \
+            libxcb-icccm4-dev libxcb-xinput-dev libxcb-xtest0-dev \
+            libfreetype-dev libharfbuzz-dev libfontconfig-dev
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4
         with:
